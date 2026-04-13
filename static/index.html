@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Кордон — Border Dashboard</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #131824;
+    --surface2: #1a2030;
+    --border: #252d40;
+    --text: #e2e8f0;
+    --text2: #8892a8;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --accent: #6366f1;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    grid-template-rows: 56px 1fr;
+    height: 100vh;
+  }
+
+  .header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    z-index: 1000;
+  }
+
+  .header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+  .header h1 span { color: var(--accent); }
+
+  .header-controls { display: flex; gap: 12px; align-items: center; }
+
+  .refresh-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.2s;
+  }
+  .refresh-btn:hover { border-color: var(--accent); }
+  .refresh-btn.loading { opacity: 0.5; pointer-events: none; }
+
+  .last-update { font-size: 12px; color: var(--text2); }
+
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar::-webkit-scrollbar { width: 4px; }
+  .sidebar::-webkit-scrollbar-track { background: transparent; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .location-section { padding: 16px; border-bottom: 1px solid var(--border); }
+  .location-section label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--text2); margin-bottom: 8px; display: block;
+  }
+
+  .location-input-wrap { display: flex; gap: 8px; }
+
+  .location-input {
+    flex: 1; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 12px; border-radius: 8px;
+    font-size: 14px; outline: none;
+  }
+  .location-input:focus { border-color: var(--accent); }
+  .location-input::placeholder { color: var(--text2); }
+
+  .geo-btn {
+    background: var(--accent); border: none; color: white;
+    width: 40px; border-radius: 8px; cursor: pointer; font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .geo-btn:hover { opacity: 0.85; }
+
+  .direction-tabs { display: flex; padding: 12px 16px; gap: 8px; border-bottom: 1px solid var(--border); }
+  .dir-tab {
+    flex: 1; padding: 8px; text-align: center; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 600; color: var(--text2); transition: all 0.2s;
+  }
+  .dir-tab.active { background: var(--accent); border-color: var(--accent); color: white; }
+  .dir-tab:hover:not(.active) { border-color: var(--text2); }
+
+  .vehicle-filter { display: flex; padding: 12px 16px; gap: 8px; border-bottom: 1px solid var(--border); }
+  .veh-btn {
+    flex: 1; padding: 6px; text-align: center; background: transparent;
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+    font-size: 20px; transition: all 0.2s;
+  }
+  .veh-btn.active { background: var(--surface2); border-color: var(--accent); }
+
+  .crossings-list { flex: 1; overflow-y: auto; padding: 8px; }
+
+  .crossing-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; margin-bottom: 8px;
+    cursor: pointer; transition: all 0.2s; position: relative;
+  }
+  .crossing-card:hover { border-color: var(--accent); transform: translateX(2px); }
+  .crossing-card.recommended {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(34, 197, 94, 0.1);
+  }
+
+  .crossing-card .badge {
+    position: absolute; top: 10px; right: 10px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; padding: 3px 8px; border-radius: 4px;
+  }
+  .badge.best { background: var(--green); color: #000; }
+  .badge.good { background: var(--yellow); color: #000; }
+  .badge.busy { background: var(--orange); color: #000; }
+  .badge.heavy { background: var(--red); color: white; }
+  .badge.closed { background: #555; color: #aaa; }
+
+  .crossing-name { font-size: 15px; font-weight: 600; margin-bottom: 2px; padding-right: 60px; }
+  .crossing-country { font-size: 12px; color: var(--text2); margin-bottom: 10px; }
+
+  .crossing-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 20px; font-weight: 700; line-height: 1.2; }
+  .stat-label { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-value.green { color: var(--green); }
+  .stat-value.yellow { color: var(--yellow); }
+  .stat-value.orange { color: var(--orange); }
+  .stat-value.red { color: var(--red); }
+
+  .crossing-bar { margin-top: 10px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .crossing-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+
+  .recommendation {
+    margin-top: 10px; padding: 8px 10px;
+    background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.2);
+    border-radius: 8px; font-size: 12px; color: var(--green); line-height: 1.4;
+  }
+
+  .map-container { position: relative; }
+  #map { width: 100%; height: 100%; }
+
+  .border-marker {
+    width: 36px; height: 36px; border-radius: 50%; border: 3px solid white;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 800; color: white;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4); cursor: pointer; transition: transform 0.2s;
+  }
+  .border-marker:hover { transform: scale(1.3); }
+  .border-marker.status-green { background: var(--green); }
+  .border-marker.status-yellow { background: var(--yellow); color: #000; }
+  .border-marker.status-orange { background: var(--orange); }
+  .border-marker.status-red { background: var(--red); }
+  .border-marker.status-grey { background: #555; }
+
+  .user-marker {
+    width: 20px; height: 20px; background: var(--blue);
+    border: 3px solid white; border-radius: 50%;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  }
+
+  .map-legend {
+    position: absolute; bottom: 20px; right: 20px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; z-index: 1000; font-size: 12px;
+  }
+  .map-legend h4 { margin-bottom: 8px; font-size: 12px; }
+  .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+
+  .leaflet-popup-content-wrapper {
+    background: var(--surface) !important; color: var(--text) !important;
+    border: 1px solid var(--border) !important; border-radius: 12px !important;
+  }
+  .leaflet-popup-tip { background: var(--surface) !important; }
+  .leaflet-popup-content { font-size: 13px; line-height: 1.6; }
+
+  .detail-overlay {
+    display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(10, 14, 23, 0.85); z-index: 2000;
+    justify-content: center; align-items: center;
+  }
+  .detail-overlay.open { display: flex; }
+
+  .detail-panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; width: 600px; max-height: 80vh;
+    overflow-y: auto; padding: 24px;
+  }
+  .detail-panel h2 { font-size: 22px; margin-bottom: 4px; }
+  .detail-panel .subtitle { color: var(--text2); font-size: 14px; margin-bottom: 20px; }
+
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .detail-stat { background: var(--surface2); border-radius: 10px; padding: 16px; text-align: center; }
+  .detail-stat .val { font-size: 28px; font-weight: 800; }
+  .detail-stat .lbl {
+    font-size: 11px; color: var(--text2); text-transform: uppercase;
+    letter-spacing: 1px; margin-top: 4px;
+  }
+
+  .close-detail {
+    float: right; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); width: 32px; height: 32px; border-radius: 8px;
+    cursor: pointer; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .webcam-link {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 12px;
+    padding: 8px 14px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--blue); text-decoration: none; font-size: 13px;
+  }
+
+  .sources-bar {
+    padding: 8px 16px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text2);
+    display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+  }
+  .source-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    display: inline-block; margin-right: 4px;
+  }
+  .source-dot.online { background: var(--green); }
+  .source-dot.offline { background: var(--red); }
+
+  .data-mode {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    margin-left: 8px; font-weight: 600;
+  }
+  .data-mode.live { background: rgba(34,197,94,0.2); color: var(--green); }
+  .data-mode.sim { background: rgba(234,179,8,0.2); color: var(--yellow); }
+
+  .search-results {
+    display: none;
+    position: absolute; top: 100%; left: 0; right: 0;
+    background: var(--surface); border: 1px solid var(--border);
+    border-top: none; border-radius: 0 0 8px 8px;
+    max-height: 220px; overflow-y: auto; z-index: 100;
+  }
+  .search-results.open { display: block; }
+  .search-result {
+    padding: 10px 12px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid var(--border); transition: background 0.15s;
+  }
+  .search-result:hover, .search-result.active { background: var(--surface2); }
+  .search-result:last-child { border-bottom: none; }
+  .search-result small { color: var(--text2); display: block; font-size: 11px; margin-top: 2px; }
+
+  @media (max-width: 800px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 56px 40vh 1fr; }
+    .sidebar { order: 3; }
+    .map-container { order: 2; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="header">
+    <h1><span>&#9632;</span> КОРДОН <span class="data-mode sim" id="dataMode">SIM</span></h1>
+    <div class="header-controls">
+      <span class="last-update" id="lastUpdate">Оновлення...</span>
+      <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">&#8635; Оновити</button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <div class="location-section">
+      <label>Звідки їде (позиція)</label>
+      <div class="location-input-wrap">
+        <div style="flex:1;position:relative">
+          <input type="text" class="location-input" id="locationInput" style="width:100%"
+                 placeholder="Введіть місто, адресу..." value="Львів" autocomplete="off">
+          <div class="search-results" id="searchResults"></div>
+        </div>
+        <button class="geo-btn" onclick="getGeolocation()" title="Моя геопозиція">&#9737;</button>
+      </div>
+      <div id="locationStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
+    </div>
+
+    <div class="direction-tabs">
+      <div class="dir-tab active" data-dir="exit" onclick="setDirection('exit')">UA &#8594; EU</div>
+      <div class="dir-tab" data-dir="enter" onclick="setDirection('enter')">EU &#8594; UA</div>
+    </div>
+
+    <div class="vehicle-filter">
+      <button class="veh-btn active" data-type="car" onclick="setVehicle('car')" title="Легкове авто">&#128663;</button>
+      <button class="veh-btn" data-type="truck" onclick="setVehicle('truck')" title="Вантажівка">&#128666;</button>
+      <button class="veh-btn" data-type="bus" onclick="setVehicle('bus')" title="Автобус">&#128653;</button>
+    </div>
+
+    <div class="crossings-list" id="crossingsList"></div>
+
+    <div class="sources-bar" id="sourcesBar">
+      <span><span class="source-dot offline" id="srcDpsu"></span>ДПСУ</span>
+      <span><span class="source-dot offline" id="srcEcherha"></span>eCherha</span>
+      <span><span class="source-dot offline" id="srcPoland"></span>granica.gov.pl</span>
+      <span><span class="source-dot offline" id="srcSlovakia"></span>financnasprava.sk</span>
+    </div>
+  </aside>
+
+  <div class="map-container">
+    <div id="map"></div>
+    <div class="map-legend">
+      <h4>Статус черги</h4>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Вільно (&lt;30 хв)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div> Помірно (30-90 хв)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div> Завантажено (90-180 хв)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> Критично (&gt;3 год)</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#555"></div> Закрито</div>
+    </div>
+  </div>
+</div>
+
+<div class="detail-overlay" id="detailOverlay" onclick="if(event.target===this)closeDetail()">
+  <div class="detail-panel" id="detailPanel"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const CROSSINGS = [
+  { id:'krakovets',   name:'Краковець — Корчова',     country:'PL', lat:49.975, lng:23.157, types:['car','truck','bus'] },
+  { id:'shehyni',     name:'Шегині — Медика',         country:'PL', lat:49.792, lng:22.888, types:['car','truck','bus'] },
+  { id:'rava_ruska',  name:'Рава-Руська — Гребенне',  country:'PL', lat:50.228, lng:23.647, types:['car','truck'] },
+  { id:'ustyluh',     name:'Устилуг — Зосін',         country:'PL', lat:50.879, lng:24.033, types:['car','truck'] },
+  { id:'yahodyn',     name:'Ягодин — Дорогуськ',      country:'PL', lat:51.524, lng:23.822, types:['car','truck','bus'] },
+  { id:'hrushiv',     name:'Грушів — Будомеж',        country:'PL', lat:49.965, lng:23.005, types:['car'] },
+  { id:'smilnytsia',  name:'Смільниця — Кросценко',   country:'PL', lat:49.377, lng:22.486, types:['car'] },
+  { id:'uzhhorod',    name:'Ужгород — В.Немецьке',    country:'SK', lat:48.658, lng:22.214, types:['car','truck'] },
+  { id:'ubla',        name:'Убля — Убля',             country:'SK', lat:48.930, lng:22.381, types:['car'] },
+  { id:'chop',        name:'Чоп — Загонь',            country:'HU', lat:48.433, lng:22.195, types:['car','truck','bus'] },
+  { id:'tysa',        name:'Тиса — Тисабеч',          country:'HU', lat:48.100, lng:23.575, types:['car'] },
+  { id:'porubne',     name:'Порубне — Сірет',         country:'RO', lat:48.218, lng:25.953, types:['car','truck','bus'] },
+  { id:'dyakove',     name:'Дякове — Галмеу',         country:'RO', lat:48.003, lng:23.318, types:['car','truck'] },
+  { id:'solotvyno',   name:'Солотвино — С.Мармацієй', country:'RO', lat:47.950, lng:23.830, types:['car'] },
+];
+
+const CITIES = {
+  'Львів': {lat:49.8397,lng:24.0297}, 'Київ': {lat:50.4501,lng:30.5234},
+  'Одеса': {lat:46.4825,lng:30.7233}, 'Харків': {lat:49.9935,lng:36.2304},
+  'Дніпро': {lat:48.4647,lng:35.0462}, 'Ужгород': {lat:48.6208,lng:22.2879},
+  'Луцьк': {lat:50.7472,lng:25.3254}, 'Рівне': {lat:50.6199,lng:26.2516},
+  'Тернопіль': {lat:49.5535,lng:25.5948}, 'Вінниця': {lat:49.2331,lng:28.4682},
+  'Чернівці': {lat:48.2920,lng:25.9358}, 'Івано-Франківськ': {lat:48.9226,lng:24.7111},
+  'Варшава': {lat:52.2297,lng:21.0122}, 'Краків': {lat:50.0647,lng:19.9450},
+  'London': {lat:51.5074,lng:-0.1278}, 'Warsaw': {lat:52.2297,lng:21.0122},
+};
+
+let state = {
+  direction: 'exit',
+  vehicle: 'car',
+  userLat: 49.8397,
+  userLng: 24.0297,
+  crossingData: {},
+  isLive: false,
+};
+
+const map = L.map('map', { center: [49.5, 24], zoom: 7, zoomControl: false, attributionControl: false });
+L.control.zoom({ position: 'topright' }).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
+
+let markers = {};
+let userMarker = null;
+let routeLines = [];
+
+const FLAGS = { PL: '\u{1F1F5}\u{1F1F1}', SK: '\u{1F1F8}\u{1F1F0}', HU: '\u{1F1ED}\u{1F1FA}', RO: '\u{1F1F7}\u{1F1F4}' };
+const COUNTRY_NAMES = { PL: 'Польща', SK: 'Словаччина', HU: 'Угорщина', RO: 'Румунія' };
+
+// ── Simulated data (fallback when no backend) ──
+function generateSimData() {
+  const patterns = {
+    krakovets:  { baseCars: [120, 380], baseWait: [60, 240] },
+    shehyni:    { baseCars: [80, 300],  baseWait: [40, 200] },
+    rava_ruska: { baseCars: [30, 150],  baseWait: [20, 120] },
+    ustyluh:    { baseCars: [10, 80],   baseWait: [15, 90] },
+    yahodyn:    { baseCars: [40, 200],  baseWait: [30, 150] },
+    hrushiv:    { baseCars: [5, 40],    baseWait: [10, 45] },
+    smilnytsia: { baseCars: [5, 30],    baseWait: [10, 40] },
+    uzhhorod:   { baseCars: [20, 100],  baseWait: [20, 80] },
+    ubla:       { baseCars: [5, 25],    baseWait: [10, 30] },
+    chop:       { baseCars: [15, 80],   baseWait: [15, 70] },
+    tysa:       { baseCars: [3, 20],    baseWait: [5, 25] },
+    porubne:    { baseCars: [20, 100],  baseWait: [15, 60] },
+    dyakove:    { baseCars: [10, 50],   baseWait: [10, 40] },
+    solotvyno:  { baseCars: [3, 15],    baseWait: [5, 20] },
+  };
+  const hour = new Date().getHours();
+  const tf = (hour >= 8 && hour <= 20) ? 0.7 : 0.3;
+  const data = {};
+  CROSSINGS.forEach(c => {
+    const p = patterns[c.id] || { baseCars: [10,50], baseWait: [10,60] };
+    const r = () => Math.random();
+    const cars = Math.round(p.baseCars[0] + (p.baseCars[1]-p.baseCars[0]) * tf * (0.5+r()*0.5));
+    const wm = Math.round(p.baseWait[0] + (p.baseWait[1]-p.baseWait[0]) * tf * (0.5+r()*0.5));
+    const speed = Math.round(20 + r()*40);
+    const trucks = Math.round(cars * (0.5 + r()*1.5));
+    let status = wm < 30 ? 'green' : wm < 90 ? 'yellow' : wm < 180 ? 'orange' : 'red';
+    data[c.id] = { cars, trucks, speed, waitMinutes: wm, status, sources: ['sim'],
+      updatedAt: new Date().toLocaleTimeString('uk-UA', {hour:'2-digit',minute:'2-digit'}) };
+  });
+  return data;
+}
+
+// ── Fetch from backend API ──
+async function fetchFromAPI() {
+  try {
+    const resp = await fetch('/api/crossings');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json();
+
+    // Update source indicators
+    const src = json.sources || {};
+    document.getElementById('srcDpsu').className = `source-dot ${src.dpsu ? 'online' : 'offline'}`;
+    document.getElementById('srcEcherha').className = `source-dot ${src.echerha ? 'online' : 'offline'}`;
+    document.getElementById('srcPoland').className = `source-dot ${src.poland ? 'online' : 'offline'}`;
+    document.getElementById('srcSlovakia').className = `source-dot ${src.slovakia ? 'online' : 'offline'}`;
+
+    // Check if we got any real data
+    const crossings = json.crossings || {};
+    const hasRealData = Object.values(crossings).some(c => c.cars !== null || c.waitMinutes !== null);
+
+    if (hasRealData) {
+      state.isLive = true;
+      const dm = document.getElementById('dataMode');
+      dm.textContent = 'LIVE';
+      dm.className = 'data-mode live';
+      return crossings;
+    }
+
+    return null; // Fall back to sim
+  } catch (e) {
+    console.log('API unavailable, using simulated data:', e.message);
+    return null;
+  }
+}
+
+// ── Distance ──
+function haversine(lat1, lng1, lat2, lng2) {
+  const R = 6371;
+  const dLat = (lat2-lat1)*Math.PI/180, dLng = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function driveTimeMinutes(km) { return Math.round(km / 60 * 60); }
+
+function totalTimeMinutes(c) {
+  const d = state.crossingData[c.id];
+  const dist = haversine(state.userLat, state.userLng, c.lat, c.lng);
+  const drive = driveTimeMinutes(dist);
+  const wait = d ? (d.waitMinutes || 60) : 60;
+  return { drive, wait, total: drive + wait, distKm: Math.round(dist) };
+}
+
+function fmt(min) {
+  if (min == null) return '—';
+  if (min < 60) return `${min} хв`;
+  const h = Math.floor(min/60), m = min%60;
+  return m > 0 ? `${h} год ${m} хв` : `${h} год`;
+}
+
+// ── Render ──
+function renderCrossings() {
+  const list = document.getElementById('crossingsList');
+  const filtered = CROSSINGS.filter(c => c.types.includes(state.vehicle));
+  const withTimes = filtered.map(c => ({
+    ...c, ...totalTimeMinutes(c), data: state.crossingData[c.id] || {},
+  })).sort((a,b) => a.total - b.total);
+  const bestId = withTimes.length > 0 ? withTimes[0].id : null;
+
+  list.innerHTML = withTimes.map((c) => {
+    const d = c.data;
+    const isBest = c.id === bestId;
+    const status = d.status || 'grey';
+    const statusLabel = {green:'вільно',yellow:'помірно',orange:'завант.',red:'критично',grey:'н/д'}[status];
+    const badgeClass = {green:'best',yellow:'good',orange:'busy',red:'heavy',grey:'closed'}[status];
+    const barColor = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
+    const barWidth = Math.min(100, (d.waitMinutes||0) / 3);
+    return `
+      <div class="crossing-card ${isBest?'recommended':''}" onclick="openDetail('${c.id}')">
+        <span class="badge ${badgeClass}">${statusLabel}</span>
+        <div class="crossing-name">${c.name}</div>
+        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км</div>
+        <div class="crossing-stats">
+          <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
+          <div class="stat"><div class="stat-value">${fmt(c.wait)}</div><div class="stat-label">черга</div></div>
+          <div class="stat"><div class="stat-value">${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
+        </div>
+        <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
+        ${isBest?`<div class="recommendation">&#9733; Рекомендовано: ${fmt(c.total)} загалом (дорога + черга)</div>`:''}
+      </div>`;
+  }).join('');
+
+  renderMapMarkers(withTimes, bestId);
+}
+
+function renderMapMarkers(crossings, bestId) {
+  Object.values(markers).forEach(m => map.removeLayer(m));
+  markers = {};
+  routeLines.forEach(l => map.removeLayer(l));
+  routeLines = [];
+
+  if (userMarker) map.removeLayer(userMarker);
+  userMarker = L.marker([state.userLat, state.userLng], {
+    icon: L.divIcon({ className:'', html:'<div class="user-marker"></div>', iconSize:[20,20], iconAnchor:[10,10] }),
+    zIndexOffset: 1000
+  }).addTo(map).bindPopup('<b>Ваша позиція</b>');
+
+  crossings.forEach((c, i) => {
+    const d = c.data, status = d.status||'grey', count = d.cars!=null?d.cars:'?';
+    const m = L.marker([c.lat, c.lng], {
+      icon: L.divIcon({ className:'', html:`<div class="border-marker status-${status}">${count}</div>`, iconSize:[36,36], iconAnchor:[18,18] })
+    }).addTo(map).bindPopup(`<b>${c.name}</b><br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Дорога: ${fmt(c.drive)} (${c.distKm} км)<br><b>Загалом: ${fmt(c.total)}</b>`);
+    m.on('click', () => openDetail(c.id));
+    markers[c.id] = m;
+
+    if (i < 3) {
+      const color = i===0?'#22c55e':i===1?'#eab308':'#6366f1';
+      routeLines.push(L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:2,dashArray:'8,6',opacity:0.6}).addTo(map));
+    }
+  });
+}
+
+// ── Detail ──
+function openDetail(id) {
+  const c = CROSSINGS.find(x=>x.id===id), d = state.crossingData[id]||{}, t = totalTimeMinutes(c);
+  const status = d.status||'grey';
+  const sc = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
+  const sources = (d.sources||[]).join(', ') || 'н/д';
+
+  document.getElementById('detailPanel').innerHTML = `
+    <button class="close-detail" onclick="closeDetail()">✕</button>
+    <h2>${c.name}</h2>
+    <div class="subtitle">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · Джерела: ${sources} · ${d.updatedAt||''}</div>
+    <div class="detail-grid">
+      <div class="detail-stat"><div class="val" style="color:${sc}">${d.cars!=null?d.cars:'—'}</div><div class="lbl">Легкових авто</div></div>
+      <div class="detail-stat"><div class="val">${d.trucks!=null?d.trucks:'—'}</div><div class="lbl">Вантажівок</div></div>
+      <div class="detail-stat"><div class="val" style="color:${sc}">${fmt(d.waitMinutes)}</div><div class="lbl">Очікування</div></div>
+      <div class="detail-stat"><div class="val">${d.speed?d.speed+' авто/год':'—'}</div><div class="lbl">Швидкість</div></div>
+      <div class="detail-stat"><div class="val">${fmt(t.drive)}</div><div class="lbl">Дорога (${t.distKm} км)</div></div>
+      <div class="detail-stat"><div class="val" style="color:var(--accent)">${fmt(t.total)}</div><div class="lbl">Загальний час</div></div>
+    </div>
+    ${d.truckWaitMinutes!=null?`<p style="color:var(--text2);font-size:13px">Вантажівки: ${fmt(d.truckWaitMinutes)} очікування</p>`:''}
+    ${d.plExitMinutes!=null?`<p style="color:var(--text2);font-size:13px">Польська сторона (виїзд): ${fmt(d.plExitMinutes)}</p>`:''}
+    ${d.skWaitMinutes!=null?`<p style="color:var(--text2);font-size:13px">Словацька сторона: ${fmt(d.skWaitMinutes)}</p>`:''}
+    <a href="https://dpsu.gov.ua/uk/map" target="_blank" class="webcam-link">&#128247; ДПСУ карта</a>
+    <a href="https://nakordoni.eu" target="_blank" class="webcam-link" style="margin-left:8px">&#128640; Nakordoni</a>
+    ${d.webcam?`<a href="${d.webcam}" target="_blank" class="webcam-link" style="margin-left:8px">&#128249; Вебкамера</a>`:''}
+  `;
+  document.getElementById('detailOverlay').classList.add('open');
+  map.flyTo([c.lat, c.lng], 10, {duration:0.8});
+}
+
+function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); }
+
+// ── Controls ──
+function setDirection(dir) {
+  state.direction = dir;
+  document.querySelectorAll('.dir-tab').forEach(t => t.classList.toggle('active', t.dataset.dir===dir));
+  renderCrossings();
+}
+
+function setVehicle(type) {
+  state.vehicle = type;
+  document.querySelectorAll('.veh-btn').forEach(b => b.classList.toggle('active', b.dataset.type===type));
+  renderCrossings();
+}
+
+function getGeolocation() {
+  if (!navigator.geolocation) return;
+  const statusEl = document.getElementById('locationStatus');
+  statusEl.textContent = 'Визначаю позицію...';
+  navigator.geolocation.getCurrentPosition(pos => {
+    setUserPosition(pos.coords.latitude, pos.coords.longitude);
+    document.getElementById('locationInput').value = `${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`;
+    statusEl.textContent = 'Геопозиція визначена';
+    setTimeout(() => statusEl.textContent = '', 3000);
+  }, () => { statusEl.textContent = 'Не вдалося визначити позицію'; });
+}
+
+function setUserPosition(lat, lng, label) {
+  state.userLat = lat;
+  state.userLng = lng;
+  map.flyTo([lat, lng], 8);
+  renderCrossings();
+  if (label) document.getElementById('locationStatus').textContent = label;
+}
+
+// ── Geocoding via Nominatim (OpenStreetMap) ──
+let searchTimeout = null;
+const input = document.getElementById('locationInput');
+const resultsEl = document.getElementById('searchResults');
+let activeIdx = -1;
+
+async function geocodeSearch(query) {
+  if (query.length < 2) { resultsEl.classList.remove('open'); return; }
+
+  // Check coordinates first
+  const cm = query.match(/^(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)$/);
+  if (cm) {
+    setUserPosition(parseFloat(cm[1]), parseFloat(cm[2]));
+    resultsEl.classList.remove('open');
+    return;
+  }
+
+  // Check local cities
+  const localKey = Object.keys(CITIES).find(k => k.toLowerCase() === query.toLowerCase());
+  if (localKey) {
+    setUserPosition(CITIES[localKey].lat, CITIES[localKey].lng);
+    resultsEl.classList.remove('open');
+    return;
+  }
+
+  // Nominatim API
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&accept-language=uk,en`;
+    const resp = await fetch(url, { headers: { 'User-Agent': 'KordonDashboard/1.0' } });
+    const data = await resp.json();
+
+    if (data.length === 0) {
+      resultsEl.innerHTML = '<div class="search-result" style="color:var(--text2)">Нічого не знайдено</div>';
+      resultsEl.classList.add('open');
+      return;
+    }
+
+    activeIdx = -1;
+    resultsEl.innerHTML = data.map((r, i) => {
+      const parts = r.display_name.split(',');
+      const main = parts[0];
+      const rest = parts.slice(1, 3).join(',').trim();
+      return `<div class="search-result" data-lat="${r.lat}" data-lng="${r.lon}" data-idx="${i}">
+        ${main}<small>${rest}</small>
+      </div>`;
+    }).join('');
+    resultsEl.classList.add('open');
+
+    resultsEl.querySelectorAll('.search-result[data-lat]').forEach(el => {
+      el.addEventListener('click', () => {
+        const lat = parseFloat(el.dataset.lat);
+        const lng = parseFloat(el.dataset.lng);
+        input.value = el.querySelector('small') ? el.childNodes[0].textContent.trim() : el.textContent.trim();
+        resultsEl.classList.remove('open');
+        setUserPosition(lat, lng);
+      });
+    });
+  } catch (e) {
+    console.error('Geocoding failed:', e);
+  }
+}
+
+input.addEventListener('input', function() {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => geocodeSearch(this.value.trim()), 400);
+});
+
+input.addEventListener('keydown', function(e) {
+  const items = resultsEl.querySelectorAll('.search-result[data-lat]');
+  if (!items.length) {
+    if (e.key === 'Enter') { geocodeSearch(this.value.trim()); }
+    return;
+  }
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    activeIdx = Math.min(activeIdx + 1, items.length - 1);
+    items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    activeIdx = Math.max(activeIdx - 1, 0);
+    items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (activeIdx >= 0 && items[activeIdx]) {
+      items[activeIdx].click();
+    } else if (items[0]) {
+      items[0].click();
+    }
+  } else if (e.key === 'Escape') {
+    resultsEl.classList.remove('open');
+  }
+});
+
+// Close dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.location-section')) resultsEl.classList.remove('open');
+});
+
+// ── Refresh ──
+async function refreshData() {
+  const btn = document.getElementById('refreshBtn');
+  btn.classList.add('loading');
+  btn.textContent = '\u23F3 Завантаження...';
+
+  // Try real API first, fall back to simulation
+  const apiData = await fetchFromAPI();
+  if (apiData) {
+    state.crossingData = apiData;
+  } else {
+    state.crossingData = generateSimData();
+    state.isLive = false;
+    const dm = document.getElementById('dataMode');
+    dm.textContent = 'SIM';
+    dm.className = 'data-mode sim';
+  }
+
+  renderCrossings();
+  document.getElementById('lastUpdate').textContent =
+    `Оновлено: ${new Date().toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'})}`;
+  btn.classList.remove('loading');
+  btn.innerHTML = '&#8635; Оновити';
+}
+
+refreshData();
+setInterval(refreshData, 5 * 60 * 1000);
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeDetail(); });
+</script>
+</body>
+</html>
