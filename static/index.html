@@ -261,6 +261,25 @@
   .data-mode.live { background: rgba(34,197,94,0.2); color: var(--green); }
   .data-mode.sim { background: rgba(234,179,8,0.2); color: var(--yellow); }
 
+  .route-label {
+    background: rgba(19, 24, 36, 0.92);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    line-height: 1.4;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+    pointer-events: none;
+  }
+  .route-label .rl-name { font-weight: 700; font-size: 12px; }
+  .route-label .rl-time { font-size: 13px; font-weight: 800; color: var(--green); }
+  .route-label.rank-1 .rl-time { color: var(--yellow); }
+  .route-label.rank-2 .rl-time { color: var(--accent); }
+  .route-label .rl-breakdown { opacity: 0.5; font-size: 10px; }
+
   .search-results {
     display: none;
     position: absolute; top: 100%; left: 0; right: 0;
@@ -547,7 +566,23 @@ function renderMapMarkers(crossings, bestId) {
 
     if (i < 3) {
       const color = i===0?'#22c55e':i===1?'#eab308':'#6366f1';
-      routeLines.push(L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:2,dashArray:'8,6',opacity:0.6}).addTo(map));
+      const line = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
+      routeLines.push(line);
+
+      // Label positioned along the route line + perpendicular offset to avoid overlap
+      const t_pos = [0.3, 0.5, 0.7][i];
+      const perpOffset = [-0.12, 0, 0.12][i]; // shift perpendicular to line
+      const dx = c.lng - state.userLng, dy = c.lat - state.userLat;
+      const len = Math.sqrt(dx*dx + dy*dy) || 1;
+      const lblLat = state.userLat + dy * t_pos + (-dx/len) * perpOffset;
+      const lblLng = state.userLng + dx * t_pos + (dy/len) * perpOffset;
+      const shortName = c.name.split('—')[0].trim();
+      const labelHtml = `<div class="route-label rank-${i}"><span class="rl-name">${shortName}</span><br><span class="rl-time">${fmt(c.total)}</span> <span class="rl-breakdown">${fmt(c.drive)} дорога + ${fmt(c.wait)} черга</span></div>`;
+      const label = L.marker([lblLat, lblLng], {
+        icon: L.divIcon({ className:'', html: labelHtml, iconSize:[0,0], iconAnchor:[-4,12] }),
+        interactive: false,
+      }).addTo(map);
+      routeLines.push(label);
     }
   });
 }
