@@ -375,14 +375,25 @@
 
   <aside class="sidebar">
     <div class="location-section">
-      <label>Звідки їде (позиція)</label>
+      <label>Звідки</label>
       <div class="location-input-wrap">
         <div style="flex:1;position:relative">
           <input type="text" class="location-input" id="locationInput" style="width:100%"
-                 placeholder="Введіть місто, адресу..." value="Львів" autocomplete="off">
+                 placeholder="Місто відправлення..." value="Львів" autocomplete="off" data-field="from">
           <div class="search-results" id="searchResults"></div>
         </div>
         <button class="geo-btn" onclick="getGeolocation()" title="Моя геопозиція">&#9737;</button>
+      </div>
+    </div>
+    <div class="location-section" style="border-bottom:1px solid var(--border)">
+      <label>Куди</label>
+      <div class="location-input-wrap">
+        <div style="flex:1;position:relative">
+          <input type="text" class="location-input" id="destInput" style="width:100%"
+                 placeholder="Місто призначення (необов'язково)" value="" autocomplete="off" data-field="to">
+          <div class="search-results" id="destSearchResults"></div>
+        </div>
+        <button class="geo-btn" style="background:var(--surface2);border:1px solid var(--border);font-size:14px" onclick="clearDest()" title="Очистити">&#10005;</button>
       </div>
       <div id="locationStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
     </div>
@@ -469,7 +480,10 @@ let state = {
   userLat: 49.8397,
   userLng: 24.0297,
   crossingData: {},
-  sortBy: 'fastest', // fastest | closest | shortest_queue
+  sortBy: 'fastest',
+  destLat: null,
+  destLng: null,
+  destName: null,
   isLive: false,
 };
 
@@ -564,10 +578,26 @@ function driveTimeMinutes(km) { return Math.round(km / 60 * 60); }
 
 function totalTimeMinutes(c) {
   const d = state.crossingData[c.id];
-  const dist = haversine(state.userLat, state.userLng, c.lat, c.lng);
-  const drive = driveTimeMinutes(dist);
+  const distTo = haversine(state.userLat, state.userLng, c.lat, c.lng);
+  const driveTo = driveTimeMinutes(distTo);
   const wait = d ? (d.waitMinutes || 60) : 60;
-  return { drive, wait, total: drive + wait, distKm: Math.round(dist) };
+
+  // If destination set, add drive from border to destination
+  let driveFrom = 0, distFrom = 0;
+  if (state.destLat != null && state.destLng != null) {
+    distFrom = haversine(c.lat, c.lng, state.destLat, state.destLng);
+    driveFrom = driveTimeMinutes(distFrom);
+  }
+
+  const totalDist = Math.round(distTo + distFrom);
+  return {
+    drive: driveTo, driveTo, driveFrom, wait,
+    total: driveTo + wait + driveFrom,
+    distKm: Math.round(distTo),
+    distFromKm: Math.round(distFrom),
+    totalDistKm: totalDist,
+    hasDest: state.destLat != null,
+  };
 }
 
 function fmt(min) {
@@ -587,7 +617,7 @@ function renderCrossings() {
 
   // Sort based on selected mode
   if (state.sortBy === 'closest') {
-    withTimes.sort((a,b) => a.distKm - b.distKm);
+    withTimes.sort((a,b) => a.totalDistKm - b.totalDistKm);
   } else if (state.sortBy === 'shortest_queue') {
     withTimes.sort((a,b) => (a.wait||999) - (b.wait||999));
   } else {
@@ -603,21 +633,23 @@ function renderCrossings() {
     const badgeClass = {green:'best',yellow:'good',orange:'busy',red:'heavy',grey:'closed'}[status];
     const barColor = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
     const barWidth = Math.min(100, (d.waitMinutes||0) / 3);
+    const destInfo = c.hasDest ? `<div style="font-size:11px;color:var(--text2);margin-top:4px">До кордону ${c.distKm} км (${fmt(c.driveTo)}) + після ${c.distFromKm} км (${fmt(c.driveFrom)})</div>` : '';
     return `
       <div class="crossing-card ${isBest?'recommended':''}" onclick="openDetail('${c.id}')">
         <span class="badge ${badgeClass}">${statusLabel}</span>
         <div class="crossing-name">${c.name}</div>
-        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км</div>
+        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.hasDest ? c.totalDistKm+' км весь шлях' : c.distKm+' км'}</div>
         <div class="crossing-stats">
           <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
           <div class="stat"><div class="stat-value">${fmt(c.wait)}</div><div class="stat-label">черга</div></div>
-          <div class="stat"><div class="stat-value">${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
+          <div class="stat"><div class="stat-value">${c.hasDest ? fmt(c.total) : fmt(c.drive)}</div><div class="stat-label">${c.hasDest ? 'загалом' : 'дорога'}</div></div>
         </div>
+        ${destInfo}
         <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
         ${isBest?`<div class="recommendation">&#9733; ${
-          state.sortBy==='closest' ? `Найближче: ${c.distKm} км` :
+          state.sortBy==='closest' ? `Найближче: ${c.hasDest ? c.totalDistKm : c.distKm} км` :
           state.sortBy==='shortest_queue' ? `Найменша черга: ${fmt(c.wait)}` :
-          `Найшвидше: ${fmt(c.total)} (дорога + черга)`
+          `Найшвидше: ${fmt(c.total)}${c.hasDest ? ' (весь маршрут)' : ' (дорога + черга)'}`
         }</div>`:''}
       </div>`;
   }).join('');
@@ -636,23 +668,41 @@ function renderMapMarkers(crossings, bestId) {
   userMarker = L.marker([state.userLat, state.userLng], {
     icon: L.divIcon({ className:'', html:'<div class="user-marker"></div>', iconSize:[20,20], iconAnchor:[10,10] }),
     zIndexOffset: 1000
-  }).addTo(map).bindPopup('<b>Ваша позиція</b>');
+  }).addTo(map).bindPopup('<b>Звідки</b>');
+
+  // Destination marker
+  if (state.destLat != null) {
+    const destIcon = L.divIcon({ className:'', html:'<div class="user-marker" style="background:var(--red);box-shadow:0 0 12px rgba(239,68,68,0.6)"></div>', iconSize:[20,20], iconAnchor:[10,10] });
+    const dm = L.marker([state.destLat, state.destLng], { icon: destIcon, zIndexOffset: 1000 })
+      .addTo(map).bindPopup(`<b>Куди: ${state.destName||''}</b>`);
+    routeLines.push(dm); // tracked for cleanup
+  }
 
   crossings.forEach((c, i) => {
     const d = c.data, status = d.status||'grey', count = d.cars!=null?d.cars:'?';
     const m = L.marker([c.lat, c.lng], {
       icon: L.divIcon({ className:'', html:`<div class="border-marker status-${status}">${count}</div>`, iconSize:[36,36], iconAnchor:[18,18] })
-    }).addTo(map).bindPopup(`<b>${c.name}</b><br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Дорога: ${fmt(c.drive)} (${c.distKm} км)<br><b>Загалом: ${fmt(c.total)}</b>`);
+    }).addTo(map).bindPopup(`<b>${c.name}</b><br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Загалом: ${fmt(c.total)}`);
     m.on('click', () => openDetail(c.id));
     markers[c.id] = m;
 
     if (i < 3) {
       const color = i===0?'#22c55e':i===1?'#eab308':'#6366f1';
-      const line = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
-      routeLines.push(line);
 
-      // Store route info for pixel-based labels
-      state._routeLabels = state._routeLabels || [];
+      // Line: user → border
+      const line1 = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
+      routeLines.push(line1);
+
+      // Line: border → destination (if set)
+      if (state.destLat != null) {
+        const line2 = L.polyline([[c.lat,c.lng],[state.destLat,state.destLng]], {color,weight:2,dashArray:'4,8',opacity:0.4}).addTo(map);
+        routeLines.push(line2);
+      }
+
+      // Label on the first segment (user → border)
+      const breakdownParts = state.destLat != null
+        ? `${fmt(c.driveTo)} + ${fmt(c.wait)} + ${fmt(c.driveFrom)}`
+        : `${fmt(c.drive)} дорога + ${fmt(c.wait)} черга`;
       state._routeLabels.push({
         lat1: state.userLat, lng1: state.userLng,
         lat2: c.lat, lng2: c.lng,
@@ -662,6 +712,7 @@ function renderMapMarkers(crossings, bestId) {
         total: fmt(c.total),
         drive: fmt(c.drive),
         wait: fmt(c.wait),
+        breakdown: breakdownParts,
       });
     }
   });
@@ -715,7 +766,7 @@ function renderRouteLabels() {
     return `<div class="route-label" style="left:${p.x}px;top:${p.y}px;border-color:${p.color}33">
       <span class="rl-name" style="color:${p.color}">${p.name}</span>
       <span class="rl-time" style="color:${p.color}">${p.total}</span>
-      <span class="rl-breakdown" style="color:${p.color}">${p.drive} дорога + ${p.wait} черга</span>
+      <span class="rl-breakdown" style="color:${p.color}">${p.breakdown || (p.drive+' дорога + '+p.wait+' черга')}</span>
     </div>`;
   }).join('');
 }
@@ -800,103 +851,77 @@ function setUserPosition(lat, lng, label) {
   if (label) document.getElementById('locationStatus').textContent = label;
 }
 
-// ── Geocoding via Nominatim (OpenStreetMap) ──
-let searchTimeout = null;
-const input = document.getElementById('locationInput');
-const resultsEl = document.getElementById('searchResults');
-let activeIdx = -1;
+// ── Geocoding (reusable for both from/to) ──
+function setupGeoInput(inputEl, resultsEl, onSelect) {
+  let timeout = null, idx = -1;
 
-async function geocodeSearch(query) {
-  if (query.length < 2) { resultsEl.classList.remove('open'); return; }
+  async function search(query) {
+    if (query.length < 2) { resultsEl.classList.remove('open'); return; }
+    const cm = query.match(/^(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)$/);
+    if (cm) { onSelect(parseFloat(cm[1]), parseFloat(cm[2]), query); resultsEl.classList.remove('open'); return; }
+    const localKey = Object.keys(CITIES).find(k => k.toLowerCase() === query.toLowerCase());
+    if (localKey) { onSelect(CITIES[localKey].lat, CITIES[localKey].lng, localKey); resultsEl.classList.remove('open'); return; }
 
-  // Check coordinates first
-  const cm = query.match(/^(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)$/);
-  if (cm) {
-    setUserPosition(parseFloat(cm[1]), parseFloat(cm[2]));
-    resultsEl.classList.remove('open');
-    return;
-  }
-
-  // Check local cities
-  const localKey = Object.keys(CITIES).find(k => k.toLowerCase() === query.toLowerCase());
-  if (localKey) {
-    setUserPosition(CITIES[localKey].lat, CITIES[localKey].lng);
-    resultsEl.classList.remove('open');
-    return;
-  }
-
-  // Nominatim API
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&accept-language=uk,en`;
-    const resp = await fetch(url, { headers: { 'User-Agent': 'KordonDashboard/1.0' } });
-    const data = await resp.json();
-
-    if (data.length === 0) {
-      resultsEl.innerHTML = '<div class="search-result" style="color:var(--text2)">Нічого не знайдено</div>';
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&accept-language=uk,en`;
+      const data = await (await fetch(url, { headers: { 'User-Agent': 'KordonDashboard/1.0' } })).json();
+      if (!data.length) { resultsEl.innerHTML = '<div class="search-result" style="color:var(--text2)">Нічого не знайдено</div>'; resultsEl.classList.add('open'); return; }
+      idx = -1;
+      resultsEl.innerHTML = data.map(r => {
+        const parts = r.display_name.split(',');
+        return `<div class="search-result" data-lat="${r.lat}" data-lng="${r.lon}">${parts[0]}<small>${parts.slice(1,3).join(',').trim()}</small></div>`;
+      }).join('');
       resultsEl.classList.add('open');
-      return;
-    }
-
-    activeIdx = -1;
-    resultsEl.innerHTML = data.map((r, i) => {
-      const parts = r.display_name.split(',');
-      const main = parts[0];
-      const rest = parts.slice(1, 3).join(',').trim();
-      return `<div class="search-result" data-lat="${r.lat}" data-lng="${r.lon}" data-idx="${i}">
-        ${main}<small>${rest}</small>
-      </div>`;
-    }).join('');
-    resultsEl.classList.add('open');
-
-    resultsEl.querySelectorAll('.search-result[data-lat]').forEach(el => {
-      el.addEventListener('click', () => {
-        const lat = parseFloat(el.dataset.lat);
-        const lng = parseFloat(el.dataset.lng);
-        input.value = el.querySelector('small') ? el.childNodes[0].textContent.trim() : el.textContent.trim();
-        resultsEl.classList.remove('open');
-        setUserPosition(lat, lng);
+      resultsEl.querySelectorAll('.search-result[data-lat]').forEach(el => {
+        el.addEventListener('click', () => {
+          const name = el.querySelector('small') ? el.childNodes[0].textContent.trim() : el.textContent.trim();
+          inputEl.value = name;
+          resultsEl.classList.remove('open');
+          onSelect(parseFloat(el.dataset.lat), parseFloat(el.dataset.lng), name);
+        });
       });
-    });
-  } catch (e) {
-    console.error('Geocoding failed:', e);
+    } catch(e) { console.error('Geocoding failed:', e); }
   }
+
+  inputEl.addEventListener('input', function() { clearTimeout(timeout); timeout = setTimeout(() => search(this.value.trim()), 400); });
+  inputEl.addEventListener('keydown', function(e) {
+    const items = resultsEl.querySelectorAll('.search-result[data-lat]');
+    if (!items.length) { if (e.key === 'Enter') search(this.value.trim()); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx+1, items.length-1); items.forEach((el,i) => el.classList.toggle('active', i===idx)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx-1, 0); items.forEach((el,i) => el.classList.toggle('active', i===idx)); }
+    else if (e.key === 'Enter') { e.preventDefault(); (items[idx >= 0 ? idx : 0])?.click(); }
+    else if (e.key === 'Escape') resultsEl.classList.remove('open');
+  });
 }
 
-input.addEventListener('input', function() {
-  clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => geocodeSearch(this.value.trim()), 400);
-});
+// FROM input
+setupGeoInput(
+  document.getElementById('locationInput'),
+  document.getElementById('searchResults'),
+  (lat, lng, name) => setUserPosition(lat, lng)
+);
 
-input.addEventListener('keydown', function(e) {
-  const items = resultsEl.querySelectorAll('.search-result[data-lat]');
-  if (!items.length) {
-    if (e.key === 'Enter') { geocodeSearch(this.value.trim()); }
-    return;
+// TO input
+setupGeoInput(
+  document.getElementById('destInput'),
+  document.getElementById('destSearchResults'),
+  (lat, lng, name) => {
+    state.destLat = lat; state.destLng = lng; state.destName = name;
+    renderCrossings();
   }
+);
 
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    activeIdx = Math.min(activeIdx + 1, items.length - 1);
-    items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    activeIdx = Math.max(activeIdx - 1, 0);
-    items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
-  } else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (activeIdx >= 0 && items[activeIdx]) {
-      items[activeIdx].click();
-    } else if (items[0]) {
-      items[0].click();
-    }
-  } else if (e.key === 'Escape') {
-    resultsEl.classList.remove('open');
-  }
-});
+function clearDest() {
+  state.destLat = null; state.destLng = null; state.destName = null;
+  document.getElementById('destInput').value = '';
+  renderCrossings();
+}
 
-// Close dropdown on outside click
+// Close dropdowns on outside click
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.location-section')) resultsEl.classList.remove('open');
+  if (!e.target.closest('.location-section')) {
+    document.querySelectorAll('.search-results').forEach(el => el.classList.remove('open'));
+  }
 });
 
 // ── Refresh ──
