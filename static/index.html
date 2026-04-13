@@ -123,6 +123,20 @@
   }
   .veh-btn.active { background: var(--surface2); border-color: var(--accent); }
 
+  .sort-tabs {
+    display: flex; padding: 8px 16px; gap: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sort-tab {
+    flex: 1; padding: 6px 4px; text-align: center;
+    background: transparent; border: 1px solid var(--border);
+    border-radius: 6px; cursor: pointer;
+    font-size: 11px; font-weight: 600; color: var(--text2);
+    transition: all 0.2s;
+  }
+  .sort-tab.active { background: var(--surface2); border-color: var(--accent); color: var(--text); }
+  .sort-tab:hover:not(.active) { border-color: var(--text2); }
+
   .crossings-list { flex: 1; overflow-y: auto; padding: 8px; }
 
   .crossing-card {
@@ -339,6 +353,12 @@
       <button class="veh-btn" data-type="bus" onclick="setVehicle('bus')" title="Автобус">&#128653;</button>
     </div>
 
+    <div class="sort-tabs">
+      <div class="sort-tab active" data-sort="fastest" onclick="setSort('fastest')">&#9889; Швидше</div>
+      <div class="sort-tab" data-sort="closest" onclick="setSort('closest')">&#128205; Ближче</div>
+      <div class="sort-tab" data-sort="shortest_queue" onclick="setSort('shortest_queue')">&#128684; Менше черга</div>
+    </div>
+
     <div class="crossings-list" id="crossingsList"></div>
 
     <div class="sources-bar" id="sourcesBar">
@@ -402,6 +422,7 @@ let state = {
   userLat: 49.8397,
   userLng: 24.0297,
   crossingData: {},
+  sortBy: 'fastest', // fastest | closest | shortest_queue
   isLive: false,
 };
 
@@ -515,7 +536,16 @@ function renderCrossings() {
   const filtered = CROSSINGS.filter(c => c.types.includes(state.vehicle));
   const withTimes = filtered.map(c => ({
     ...c, ...totalTimeMinutes(c), data: state.crossingData[c.id] || {},
-  })).sort((a,b) => a.total - b.total);
+  }));
+
+  // Sort based on selected mode
+  if (state.sortBy === 'closest') {
+    withTimes.sort((a,b) => a.distKm - b.distKm);
+  } else if (state.sortBy === 'shortest_queue') {
+    withTimes.sort((a,b) => (a.wait||999) - (b.wait||999));
+  } else {
+    withTimes.sort((a,b) => a.total - b.total);
+  }
   const bestId = withTimes.length > 0 ? withTimes[0].id : null;
 
   list.innerHTML = withTimes.map((c) => {
@@ -537,7 +567,11 @@ function renderCrossings() {
           <div class="stat"><div class="stat-value">${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
         </div>
         <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
-        ${isBest?`<div class="recommendation">&#9733; Рекомендовано: ${fmt(c.total)} загалом (дорога + черга)</div>`:''}
+        ${isBest?`<div class="recommendation">&#9733; ${
+          state.sortBy==='closest' ? `Найближче: ${c.distKm} км` :
+          state.sortBy==='shortest_queue' ? `Найменша черга: ${fmt(c.wait)}` :
+          `Найшвидше: ${fmt(c.total)} (дорога + черга)`
+        }</div>`:''}
       </div>`;
   }).join('');
 
@@ -629,6 +663,12 @@ function setDirection(dir) {
 function setVehicle(type) {
   state.vehicle = type;
   document.querySelectorAll('.veh-btn').forEach(b => b.classList.toggle('active', b.dataset.type===type));
+  renderCrossings();
+}
+
+function setSort(mode) {
+  state.sortBy = mode;
+  document.querySelectorAll('.sort-tab').forEach(t => t.classList.toggle('active', t.dataset.sort===mode));
   renderCrossings();
 }
 
