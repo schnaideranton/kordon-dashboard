@@ -275,24 +275,27 @@
   .data-mode.live { background: rgba(34,197,94,0.2); color: var(--green); }
   .data-mode.sim { background: rgba(234,179,8,0.2); color: var(--yellow); }
 
+  /* Route labels — pixel-positioned overlay */
+  .route-labels-overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    pointer-events: none; z-index: 650;
+    overflow: hidden;
+  }
   .route-label {
-    background: rgba(19, 24, 36, 0.92);
-    border: 1px solid rgba(255,255,255,0.15);
+    position: absolute;
+    background: rgba(10, 14, 23, 0.88);
     border-radius: 8px;
     padding: 5px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text);
     white-space: nowrap;
     line-height: 1.4;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.6);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
     pointer-events: none;
+    transform: translate(-50%, -50%);
+    transition: top 0.15s, left 0.15s;
   }
-  .route-label .rl-name { font-weight: 700; font-size: 12px; }
-  .route-label .rl-time { font-size: 13px; font-weight: 800; color: var(--green); }
-  .route-label.rank-1 .rl-time { color: var(--yellow); }
-  .route-label.rank-2 .rl-time { color: var(--accent); }
-  .route-label .rl-breakdown { opacity: 0.5; font-size: 10px; }
+  .route-label .rl-name { font-weight: 700; font-size: 12px; display: block; }
+  .route-label .rl-time { font-size: 14px; font-weight: 800; display: block; }
+  .route-label .rl-breakdown { display: block; font-size: 10px; opacity: 0.6; }
 
   .search-results {
     display: none;
@@ -310,11 +313,53 @@
   .search-result:last-child { border-bottom: none; }
   .search-result small { color: var(--text2); display: block; font-size: 11px; margin-top: 2px; }
 
+  /* ── Mobile: full-scroll layout ── */
   @media (max-width: 800px) {
-    .app { grid-template-columns: 1fr; grid-template-rows: 56px 40vh 1fr; }
-    .sidebar { order: 3; }
-    .map-container { order: 2; }
+    body { overflow: auto; height: auto; }
+    .app {
+      display: flex; flex-direction: column;
+      height: auto; min-height: 100vh;
+    }
+    .header { flex-shrink: 0; position: sticky; top: 0; z-index: 1000; }
+
+    .map-container {
+      order: 2; height: 50vh; min-height: 300px;
+      position: relative; flex-shrink: 0;
+    }
+    .map-expand-btn {
+      display: flex;
+    }
+    .map-legend { display: none; }
+
+    .sidebar {
+      order: 3; overflow: visible;
+      border-right: none; flex-shrink: 0;
+    }
+    .crossings-list {
+      overflow: visible; flex: none;
+      padding: 8px 12px;
+    }
+    .crossing-card { margin-bottom: 10px; }
+    .sources-bar { padding: 12px 16px; }
+
+    .detail-panel { width: 95vw; max-height: 90vh; padding: 16px; }
+    .detail-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+    .detail-stat { padding: 10px; }
+    .detail-stat .val { font-size: 22px; }
   }
+
+  /* Map expand button (mobile only) */
+  .map-expand-btn {
+    display: none;
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 700; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 16px; color: var(--text);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  .map-container.expanded { height: 100vh; min-height: 100vh; }
+  .map-container.expanded .map-expand-btn span::after { content: 'Згорнути карту'; }
+  .map-container:not(.expanded) .map-expand-btn span::after { content: 'Розгорнути карту'; }
 </style>
 </head>
 <body>
@@ -369,8 +414,10 @@
     </div>
   </aside>
 
-  <div class="map-container">
+  <div class="map-container" id="mapContainer">
     <div id="map"></div>
+    <div class="route-labels-overlay" id="routeLabelsOverlay"></div>
+    <button class="map-expand-btn" onclick="toggleMapExpand()"><span></span></button>
     <div class="map-legend">
       <h4>Статус черги</h4>
       <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Вільно (&lt;30 хв)</div>
@@ -583,6 +630,7 @@ function renderMapMarkers(crossings, bestId) {
   markers = {};
   routeLines.forEach(l => map.removeLayer(l));
   routeLines = [];
+  state._routeLabels = [];
 
   if (userMarker) map.removeLayer(userMarker);
   userMarker = L.marker([state.userLat, state.userLng], {
@@ -603,22 +651,82 @@ function renderMapMarkers(crossings, bestId) {
       const line = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
       routeLines.push(line);
 
-      // Label positioned along the route line + perpendicular offset to avoid overlap
-      const t_pos = [0.3, 0.5, 0.7][i];
-      const perpOffset = [-0.12, 0, 0.12][i]; // shift perpendicular to line
-      const dx = c.lng - state.userLng, dy = c.lat - state.userLat;
-      const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      const lblLat = state.userLat + dy * t_pos + (-dx/len) * perpOffset;
-      const lblLng = state.userLng + dx * t_pos + (dy/len) * perpOffset;
-      const shortName = c.name.split('—')[0].trim();
-      const labelHtml = `<div class="route-label rank-${i}"><span class="rl-name">${shortName}</span><br><span class="rl-time">${fmt(c.total)}</span> <span class="rl-breakdown">${fmt(c.drive)} дорога + ${fmt(c.wait)} черга</span></div>`;
-      const label = L.marker([lblLat, lblLng], {
-        icon: L.divIcon({ className:'', html: labelHtml, iconSize:[0,0], iconAnchor:[-4,12] }),
-        interactive: false,
-      }).addTo(map);
-      routeLines.push(label);
+      // Store route info for pixel-based labels
+      state._routeLabels = state._routeLabels || [];
+      state._routeLabels.push({
+        lat1: state.userLat, lng1: state.userLng,
+        lat2: c.lat, lng2: c.lng,
+        t: [0.3, 0.5, 0.7][i],
+        color: color,
+        name: c.name.split('—')[0].trim(),
+        total: fmt(c.total),
+        drive: fmt(c.drive),
+        wait: fmt(c.wait),
+      });
     }
   });
+
+  renderRouteLabels();
+}
+
+// ── Pixel-based route labels (reposition on zoom/pan) ──
+function renderRouteLabels() {
+  const overlay = document.getElementById('routeLabelsOverlay');
+  if (!overlay) return;
+  const labels = state._routeLabels || [];
+  if (!labels.length) { overlay.innerHTML = ''; return; }
+
+  // Calculate pixel positions for each label
+  const positions = labels.map(r => {
+    const lat = r.lat1 + (r.lat2 - r.lat1) * r.t;
+    const lng = r.lng1 + (r.lng2 - r.lng1) * r.t;
+    const pt = map.latLngToContainerPoint([lat, lng]);
+    return { ...r, x: pt.x, y: pt.y };
+  });
+
+  // Collision avoidance — push labels apart if too close
+  const labelH = 52, labelW = 160; // approximate label dimensions
+  for (let pass = 0; pass < 5; pass++) {
+    for (let i = 0; i < positions.length; i++) {
+      for (let j = i + 1; j < positions.length; j++) {
+        const dx = positions[j].x - positions[i].x;
+        const dy = positions[j].y - positions[i].y;
+        const overlapX = labelW - Math.abs(dx);
+        const overlapY = labelH - Math.abs(dy);
+        if (overlapX > 0 && overlapY > 0) {
+          // Push apart along the axis with less overlap
+          if (overlapY < overlapX) {
+            const push = overlapY / 2 + 4;
+            const dir = dy >= 0 ? 1 : -1;
+            positions[i].y -= push * dir;
+            positions[j].y += push * dir;
+          } else {
+            const push = overlapX / 2 + 4;
+            const dir = dx >= 0 ? 1 : -1;
+            positions[i].x -= push * dir;
+            positions[j].x += push * dir;
+          }
+        }
+      }
+    }
+  }
+
+  overlay.innerHTML = positions.map(p => {
+    return `<div class="route-label" style="left:${p.x}px;top:${p.y}px;border-color:${p.color}33">
+      <span class="rl-name" style="color:${p.color}">${p.name}</span>
+      <span class="rl-time" style="color:${p.color}">${p.total}</span>
+      <span class="rl-breakdown" style="color:${p.color}">${p.drive} дорога + ${p.wait} черга</span>
+    </div>`;
+  }).join('');
+}
+
+map.on('move zoom moveend zoomend', renderRouteLabels);
+
+// ── Map expand (mobile) ──
+function toggleMapExpand() {
+  const mc = document.getElementById('mapContainer');
+  mc.classList.toggle('expanded');
+  setTimeout(() => map.invalidateSize(), 300);
 }
 
 // ── Detail ──
