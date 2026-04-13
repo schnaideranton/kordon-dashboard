@@ -451,6 +451,7 @@ const CROSSINGS = [
 ];
 
 const CITIES = {
+  // Ukrainian
   'Львів': {lat:49.8397,lng:24.0297}, 'Київ': {lat:50.4501,lng:30.5234},
   'Одеса': {lat:46.4825,lng:30.7233}, 'Харків': {lat:49.9935,lng:36.2304},
   'Дніпро': {lat:48.4647,lng:35.0462}, 'Ужгород': {lat:48.6208,lng:22.2879},
@@ -458,7 +459,37 @@ const CITIES = {
   'Тернопіль': {lat:49.5535,lng:25.5948}, 'Вінниця': {lat:49.2331,lng:28.4682},
   'Чернівці': {lat:48.2920,lng:25.9358}, 'Івано-Франківськ': {lat:48.9226,lng:24.7111},
   'Варшава': {lat:52.2297,lng:21.0122}, 'Краків': {lat:50.0647,lng:19.9450},
-  'London': {lat:51.5074,lng:-0.1278}, 'Warsaw': {lat:52.2297,lng:21.0122},
+  'Будапешт': {lat:47.4979,lng:19.0402}, 'Братислава': {lat:48.1486,lng:17.1077},
+  'Бухарест': {lat:44.4268,lng:26.1025}, 'Берлін': {lat:52.5200,lng:13.4050},
+  'Прага': {lat:50.0755,lng:14.4378}, 'Відень': {lat:48.2082,lng:16.3738},
+  'Мюнхен': {lat:48.1351,lng:11.5820}, 'Вроцлав': {lat:51.1079,lng:17.0385},
+  // Russian
+  'Львов': {lat:49.8397,lng:24.0297}, 'Киев': {lat:50.4501,lng:30.5234},
+  'Одесса': {lat:46.4825,lng:30.7233}, 'Харьков': {lat:49.9935,lng:36.2304},
+  'Днепр': {lat:48.4647,lng:35.0462}, 'Ужгород': {lat:48.6208,lng:22.2879},
+  'Луцк': {lat:50.7472,lng:25.3254}, 'Ровно': {lat:50.6199,lng:26.2516},
+  'Тернополь': {lat:49.5535,lng:25.5948}, 'Винница': {lat:49.2331,lng:28.4682},
+  'Черновцы': {lat:48.2920,lng:25.9358}, 'Ивано-Франковск': {lat:48.9226,lng:24.7111},
+  'Варшава': {lat:52.2297,lng:21.0122}, 'Краков': {lat:50.0647,lng:19.9450},
+  'Будапешт': {lat:47.4979,lng:19.0402}, 'Берлин': {lat:52.5200,lng:13.4050},
+  'Прага': {lat:50.0755,lng:14.4378}, 'Вена': {lat:48.2082,lng:16.3738},
+  'Мюнхен': {lat:48.1351,lng:11.5820}, 'Вроцлав': {lat:51.1079,lng:17.0385},
+  // English
+  'Lviv': {lat:49.8397,lng:24.0297}, 'Kyiv': {lat:50.4501,lng:30.5234},
+  'Kiev': {lat:50.4501,lng:30.5234}, 'Odesa': {lat:46.4825,lng:30.7233},
+  'Odessa': {lat:46.4825,lng:30.7233}, 'Kharkiv': {lat:49.9935,lng:36.2304},
+  'Dnipro': {lat:48.4647,lng:35.0462}, 'Uzhhorod': {lat:48.6208,lng:22.2879},
+  'Lutsk': {lat:50.7472,lng:25.3254}, 'Rivne': {lat:50.6199,lng:26.2516},
+  'Ternopil': {lat:49.5535,lng:25.5948}, 'Vinnytsia': {lat:49.2331,lng:28.4682},
+  'Chernivtsi': {lat:48.2920,lng:25.9358}, 'Ivano-Frankivsk': {lat:48.9226,lng:24.7111},
+  'Warsaw': {lat:52.2297,lng:21.0122}, 'Krakow': {lat:50.0647,lng:19.9450},
+  'Cracow': {lat:50.0647,lng:19.9450}, 'Budapest': {lat:47.4979,lng:19.0402},
+  'Bratislava': {lat:48.1486,lng:17.1077}, 'Bucharest': {lat:44.4268,lng:26.1025},
+  'Berlin': {lat:52.5200,lng:13.4050}, 'Prague': {lat:50.0755,lng:14.4378},
+  'Vienna': {lat:48.2082,lng:16.3738}, 'Munich': {lat:48.1351,lng:11.5820},
+  'Wroclaw': {lat:51.1079,lng:17.0385}, 'London': {lat:51.5074,lng:-0.1278},
+  'Paris': {lat:48.8566,lng:2.3522}, 'Amsterdam': {lat:52.3676,lng:4.9041},
+  'Milan': {lat:45.4642,lng:9.1900}, 'Rome': {lat:41.9028,lng:12.4964},
 };
 
 let state = {
@@ -482,27 +513,13 @@ let markers = {};
 let userMarker = null;
 let routeLines = [];
 
-// Ukraine western border (PL/SK/HU/RO) — bright line
-const UA_BORDER = [
-  [51.505,23.605],[51.293,23.616],[50.866,24.096],[50.378,23.945],[50.213,24.100],
-  [50.160,23.954],[50.083,23.872],[49.987,23.860],[49.893,23.679],[49.782,23.570],
-  [49.690,23.402],[49.594,23.256],[49.504,23.098],[49.423,22.880],[49.310,22.707],
-  [49.201,22.541],[49.089,22.579],[49.000,22.522],[48.933,22.339],[48.870,22.191],
-  [48.793,22.161],[48.685,22.134],[48.607,22.181],[48.539,22.243],[48.471,22.260],
-  [48.400,22.162],[48.358,22.107],[48.314,22.497],[48.234,22.625],[48.183,22.705],
-  [48.105,22.860],[48.080,22.962],[48.050,23.126],[48.002,23.412],[47.959,23.629],
-  [47.955,24.004],[48.020,24.207],[48.088,24.376],[48.171,24.526],[48.222,24.669],
-  [48.190,24.889],[48.149,25.044],[48.088,25.159],[47.994,25.289],[47.959,25.431],
-  [47.942,25.589],[47.952,25.764],[47.968,25.886],[47.998,26.073],[48.055,26.236],
-  [48.140,26.346],[48.229,26.398],[48.276,26.590],[48.227,26.683],[48.168,26.827],
-  [48.091,26.979],[48.014,27.098],[47.958,27.229],[47.937,27.410],[47.874,27.548],
-  [47.784,27.672],[47.720,27.797],[47.663,27.925],[47.614,28.090],[47.595,28.253],
-  [47.591,28.445],[47.627,28.599],[47.660,28.719],[47.752,28.827],[47.801,28.930],
-  [47.863,29.041],[47.941,29.166],[48.000,29.253],[48.066,29.362],[48.129,29.455],
-  [48.193,29.539],[48.264,29.615],[48.350,29.706],[48.432,29.803],[48.465,29.926],
-  [48.467,30.072],[48.474,30.234],[48.518,30.387]
-];
-L.polyline(UA_BORDER, { color: '#f59e0b', weight: 2, opacity: 0.6, dashArray: '6,4' }).addTo(map);
+// Ukraine border from OSM (official, accurate)
+fetch('https://nominatim.openstreetmap.org/search?country=Ukraine&polygon_geojson=1&format=json&limit=1', { headers: { 'User-Agent': 'KordonDashboard/1.0' } })
+  .then(r => r.json()).then(data => {
+    if (data[0]?.geojson) {
+      L.geoJSON(data[0].geojson, { style: { color: '#f59e0b', weight: 2, opacity: 0.5, fillOpacity: 0.03, dashArray: '6,4' } }).addTo(map);
+    }
+  }).catch(() => {});
 
 const FLAGS = { PL: '\u{1F1F5}\u{1F1F1}', SK: '\u{1F1F8}\u{1F1F0}', HU: '\u{1F1ED}\u{1F1FA}', RO: '\u{1F1F7}\u{1F1F4}' };
 const COUNTRY_NAMES = { PL: 'Польща', SK: 'Словаччина', HU: 'Угорщина', RO: 'Румунія' };
@@ -900,11 +917,27 @@ function setupGeoInput(inputEl, resultsEl, onSelect) {
     if (query.length < 2) { resultsEl.classList.remove('open'); return; }
     const cm = query.match(/^(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)$/);
     if (cm) { onSelect(parseFloat(cm[1]), parseFloat(cm[2]), query); resultsEl.classList.remove('open'); return; }
-    const localKey = Object.keys(CITIES).find(k => k.toLowerCase() === query.toLowerCase());
-    if (localKey) { onSelect(CITIES[localKey].lat, CITIES[localKey].lng, localKey); resultsEl.classList.remove('open'); return; }
+    const q = query.toLowerCase();
+    const localKeys = Object.keys(CITIES).filter(k => k.toLowerCase().startsWith(q));
+    if (localKeys.length === 1) { const k = localKeys[0]; onSelect(CITIES[k].lat, CITIES[k].lng, k); resultsEl.classList.remove('open'); return; }
+    if (localKeys.length > 1) {
+      idx = -1;
+      resultsEl.innerHTML = localKeys.slice(0,6).map(k =>
+        `<div class="search-result" data-lat="${CITIES[k].lat}" data-lng="${CITIES[k].lng}">${k}</div>`
+      ).join('');
+      resultsEl.classList.add('open');
+      resultsEl.querySelectorAll('.search-result[data-lat]').forEach(el => {
+        el.addEventListener('click', () => {
+          inputEl.value = el.textContent.trim();
+          resultsEl.classList.remove('open');
+          onSelect(parseFloat(el.dataset.lat), parseFloat(el.dataset.lng), el.textContent.trim());
+        });
+      });
+      return;
+    }
 
     try {
-      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&accept-language=uk,en`;
+      const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=6&accept-language=uk,ru,en`;
       const data = await (await fetch(url, { headers: { 'User-Agent': 'KordonDashboard/1.0' } })).json();
       if (!data.length) { resultsEl.innerHTML = '<div class="search-result" style="color:var(--text2)">Нічого не знайдено</div>'; resultsEl.classList.add('open'); return; }
       idx = -1;
