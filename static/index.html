@@ -106,14 +106,6 @@
   }
   .geo-btn:hover { opacity: 0.85; }
 
-  .direction-tabs { display: flex; padding: 12px 16px; gap: 8px; border-bottom: 1px solid var(--border); }
-  .dir-tab {
-    flex: 1; padding: 8px; text-align: center; background: var(--surface2);
-    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
-    font-size: 12px; font-weight: 600; color: var(--text2); transition: all 0.2s;
-  }
-  .dir-tab.active { background: var(--accent); border-color: var(--accent); color: white; }
-  .dir-tab:hover:not(.active) { border-color: var(--text2); }
 
   .vehicle-filter { display: flex; padding: 12px 16px; gap: 8px; border-bottom: 1px solid var(--border); }
   .veh-btn {
@@ -398,11 +390,6 @@
       <div id="locationStatus" style="font-size:11px;color:var(--text2);margin-top:6px"></div>
     </div>
 
-    <div class="direction-tabs">
-      <div class="dir-tab active" data-dir="exit" onclick="setDirection('exit')">UA &#8594; EU</div>
-      <div class="dir-tab" data-dir="enter" onclick="setDirection('enter')">EU &#8594; UA</div>
-    </div>
-
     <div class="vehicle-filter">
       <button class="veh-btn active" data-type="car" onclick="setVehicle('car')" title="Легкове авто">&#128663;</button>
       <button class="veh-btn" data-type="truck" onclick="setVehicle('truck')" title="Вантажівка">&#128666;</button>
@@ -475,11 +462,11 @@ const CITIES = {
 };
 
 let state = {
-  direction: 'exit',
   vehicle: 'car',
   userLat: 49.8397,
   userLng: 24.0297,
   crossingData: {},
+  routes: {},
   sortBy: 'fastest',
   destLat: null,
   destLng: null,
@@ -494,6 +481,28 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { m
 let markers = {};
 let userMarker = null;
 let routeLines = [];
+
+// Ukraine western border (PL/SK/HU/RO) — bright line
+const UA_BORDER = [
+  [51.505,23.605],[51.293,23.616],[50.866,24.096],[50.378,23.945],[50.213,24.100],
+  [50.160,23.954],[50.083,23.872],[49.987,23.860],[49.893,23.679],[49.782,23.570],
+  [49.690,23.402],[49.594,23.256],[49.504,23.098],[49.423,22.880],[49.310,22.707],
+  [49.201,22.541],[49.089,22.579],[49.000,22.522],[48.933,22.339],[48.870,22.191],
+  [48.793,22.161],[48.685,22.134],[48.607,22.181],[48.539,22.243],[48.471,22.260],
+  [48.400,22.162],[48.358,22.107],[48.314,22.497],[48.234,22.625],[48.183,22.705],
+  [48.105,22.860],[48.080,22.962],[48.050,23.126],[48.002,23.412],[47.959,23.629],
+  [47.955,24.004],[48.020,24.207],[48.088,24.376],[48.171,24.526],[48.222,24.669],
+  [48.190,24.889],[48.149,25.044],[48.088,25.159],[47.994,25.289],[47.959,25.431],
+  [47.942,25.589],[47.952,25.764],[47.968,25.886],[47.998,26.073],[48.055,26.236],
+  [48.140,26.346],[48.229,26.398],[48.276,26.590],[48.227,26.683],[48.168,26.827],
+  [48.091,26.979],[48.014,27.098],[47.958,27.229],[47.937,27.410],[47.874,27.548],
+  [47.784,27.672],[47.720,27.797],[47.663,27.925],[47.614,28.090],[47.595,28.253],
+  [47.591,28.445],[47.627,28.599],[47.660,28.719],[47.752,28.827],[47.801,28.930],
+  [47.863,29.041],[47.941,29.166],[48.000,29.253],[48.066,29.362],[48.129,29.455],
+  [48.193,29.539],[48.264,29.615],[48.350,29.706],[48.432,29.803],[48.465,29.926],
+  [48.467,30.072],[48.474,30.234],[48.518,30.387]
+];
+L.polyline(UA_BORDER, { color: '#f59e0b', weight: 2, opacity: 0.6, dashArray: '6,4' }).addTo(map);
 
 const FLAGS = { PL: '\u{1F1F5}\u{1F1F1}', SK: '\u{1F1F8}\u{1F1F0}', HU: '\u{1F1ED}\u{1F1FA}', RO: '\u{1F1F7}\u{1F1F4}' };
 const COUNTRY_NAMES = { PL: 'Польща', SK: 'Словаччина', HU: 'Угорщина', RO: 'Румунія' };
@@ -527,7 +536,7 @@ function generateSimData() {
     const speed = Math.round(20 + r()*40);
     const trucks = Math.round(cars * (0.5 + r()*1.5));
     let status = wm < 30 ? 'green' : wm < 90 ? 'yellow' : wm < 180 ? 'orange' : 'red';
-    data[c.id] = { cars, trucks, speed, waitMinutes: wm, status, sources: ['sim'],
+    data[c.id] = { cars, trucks, speed, waitMinutes: wm, status, isOpen: true, sources: ['sim'],
       updatedAt: new Date().toLocaleTimeString('uk-UA', {hour:'2-digit',minute:'2-digit'}) };
   });
   return data;
@@ -574,29 +583,38 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-function driveTimeMinutes(km) { return Math.round(km / 60 * 60); }
+// Fetch real driving routes via backend (proxied OSRM)
+let _lastRoutePos = null;
+async function fetchRoutes() {
+  const posKey = `${state.userLat},${state.userLng}`;
+  if (_lastRoutePos === posKey && Object.keys(state.routes).length > 0) return;
+  _lastRoutePos = posKey;
+  try {
+    const resp = await fetch(`/api/routes?from_lat=${state.userLat}&from_lng=${state.userLng}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    state.routes = await resp.json();
+  } catch(e) { console.warn('Routes fetch failed:', e); }
+}
 
 function totalTimeMinutes(c) {
   const d = state.crossingData[c.id];
-  const distTo = haversine(state.userLat, state.userLng, c.lat, c.lng);
-  const driveTo = driveTimeMinutes(distTo);
+  const route = state.routes[c.id];
+  // Use OSRM data if available, fallback to haversine estimate
+  const distTo = route ? route.distKm : Math.round(haversine(state.userLat, state.userLng, c.lat, c.lng) * 1.3);
+  const driveTo = route ? route.driveMin : Math.round(distTo / 50 * 60);
   const wait = d ? (d.waitMinutes || 60) : 60;
 
-  // Destination is only used for relevance scoring (which crossings are on the way)
-  // We do NOT count drive time after the border
-  let relevance = 0; // lower = more relevant to destination direction
+  let relevance = 0;
   if (state.destLat != null && state.destLng != null) {
-    // How much does this crossing lie on the path toward destination?
-    // = distance(origin→crossing) + distance(crossing→dest) vs distance(origin→dest)
     const directDist = haversine(state.userLat, state.userLng, state.destLat, state.destLng);
-    const viaDist = distTo + haversine(c.lat, c.lng, state.destLat, state.destLng);
-    relevance = viaDist - directDist; // 0 = perfectly on the way, high = big detour
+    const viaDist = haversine(state.userLat, state.userLng, c.lat, c.lng) + haversine(c.lat, c.lng, state.destLat, state.destLng);
+    relevance = viaDist - directDist;
   }
 
   return {
     drive: driveTo, wait,
     total: driveTo + wait,
-    distKm: Math.round(distTo),
+    distKm: distTo,
     hasDest: state.destLat != null,
     relevance: Math.round(relevance),
   };
@@ -641,7 +659,8 @@ function renderCrossings() {
       withTimes.sort((a,b) => a.total - b.total);
     }
   }
-  const bestId = withTimes.length > 0 ? withTimes[0].id : null;
+  // Best = first open crossing (skip closed)
+  const bestId = (withTimes.find(c => c.data.isOpen !== false) || {}).id || null;
 
   list.innerHTML = withTimes.map((c) => {
     const d = c.data;
@@ -651,11 +670,12 @@ function renderCrossings() {
     const badgeClass = {green:'best',yellow:'good',orange:'busy',red:'heavy',grey:'closed'}[status];
     const barColor = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
     const barWidth = Math.min(100, (d.waitMinutes||0) / 3);
+    const isClosed = d.isOpen === false;
     const detourNote = (c.hasDest && c.relevance >= 30) ? `<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.6">${c.relevance < 100 ? 'невеликий крюк' : 'великий крюк'} (+${c.relevance} км)</div>` : '';
     return `
-      <div class="crossing-card ${isBest?'recommended':''}" onclick="openDetail('${c.id}')">
+      <div class="crossing-card ${isBest?'recommended':''}" style="${isClosed?'opacity:0.5':''}" onclick="openDetail('${c.id}')">
         <span class="badge ${badgeClass}">${statusLabel}</span>
-        <div class="crossing-name">${c.name}</div>
+        <div class="crossing-name">${c.name}${isClosed?' <span style="color:#ef4444;font-size:11px;font-weight:400">(тимчасово закритий)</span>':''}</div>
         <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км до кордону</div>
         <div class="crossing-stats">
           <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
@@ -696,26 +716,40 @@ function renderMapMarkers(crossings, bestId) {
     routeLines.push(dm); // tracked for cleanup
   }
 
-  crossings.forEach((c, i) => {
+  // Top 3 open crossings for route lines
+  const openForRoutes = crossings.filter(c => c.data.isOpen !== false).slice(0, 3);
+
+  crossings.forEach((c) => {
     const d = c.data, status = d.status||'grey', count = d.cars!=null?d.cars:'?';
+    const isClosed = d.isOpen === false;
     const m = L.marker([c.lat, c.lng], {
       icon: L.divIcon({ className:'', html:`<div class="border-marker status-${status}">${count}</div>`, iconSize:[36,36], iconAnchor:[18,18] })
-    }).addTo(map).bindPopup(`<b>${c.name}</b><br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Загалом: ${fmt(c.total)}`);
+    }).addTo(map).bindPopup(`<b>${c.name}</b>${isClosed?' (тимчасово закритий)':''}<br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Загалом: ${fmt(c.total)}`);
     m.on('click', () => openDetail(c.id));
     markers[c.id] = m;
 
-    if (i < 3) {
-      const color = i===0?'#22c55e':i===1?'#eab308':'#6366f1';
+    const routeIdx = openForRoutes.indexOf(c);
+    if (routeIdx >= 0) {
+      const color = routeIdx===0?'#22c55e':routeIdx===1?'#eab308':'#6366f1';
+      const route = state.routes[c.id];
 
-      // Line: user → border
-      const line1 = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
+      // Real route polyline or fallback to straight line
+      let routeCoords;
+      if (route && route.geometry) {
+        routeCoords = route.geometry.map(p => [p[1], p[0]]); // GeoJSON [lng,lat] → Leaflet [lat,lng]
+      } else {
+        routeCoords = [[state.userLat,state.userLng],[c.lat,c.lng]];
+      }
+      const line1 = L.polyline(routeCoords, {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
       routeLines.push(line1);
 
-      // Label on the route line (user → border only)
+      // Label at ~middle of the real route
+      const midIdx = Math.floor(routeCoords.length * [0.3, 0.5, 0.7][routeIdx]);
+      const midPt = routeCoords[Math.min(midIdx, routeCoords.length - 1)];
       state._routeLabels.push({
-        lat1: state.userLat, lng1: state.userLng,
-        lat2: c.lat, lng2: c.lng,
-        t: [0.3, 0.5, 0.7][i],
+        lat1: midPt[0], lng1: midPt[1],
+        lat2: midPt[0], lng2: midPt[1],
+        t: 0.5,
         color: color,
         name: c.name.split('—')[0].trim(),
         total: fmt(c.total),
@@ -795,9 +829,10 @@ function openDetail(id) {
   const sc = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
   const sources = (d.sources||[]).join(', ') || 'н/д';
 
+  const isClosed = d.isOpen === false;
   document.getElementById('detailPanel').innerHTML = `
     <button class="close-detail" onclick="closeDetail()">✕</button>
-    <h2>${c.name}</h2>
+    <h2>${c.name}${isClosed?' <span style="color:#ef4444;font-size:14px">(тимчасово закритий)</span>':''}</h2>
     <div class="subtitle">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · Джерела: ${sources} · ${d.updatedAt||''}</div>
     <div class="detail-grid">
       <div class="detail-stat"><div class="val" style="color:${sc}">${d.cars!=null?d.cars:'—'}</div><div class="lbl">Легкових авто</div></div>
@@ -821,11 +856,6 @@ function openDetail(id) {
 function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); }
 
 // ── Controls ──
-function setDirection(dir) {
-  state.direction = dir;
-  document.querySelectorAll('.dir-tab').forEach(t => t.classList.toggle('active', t.dataset.dir===dir));
-  renderCrossings();
-}
 
 function setVehicle(type) {
   state.vehicle = type;
@@ -851,10 +881,13 @@ function getGeolocation() {
   }, () => { statusEl.textContent = 'Не вдалося визначити позицію'; });
 }
 
-function setUserPosition(lat, lng, label) {
+async function setUserPosition(lat, lng, label) {
   state.userLat = lat;
   state.userLng = lng;
+  state.routes = {};
   map.flyTo([lat, lng], 8);
+  renderCrossings(); // render immediately with fallback estimates
+  await fetchRoutes(); // then update with real routes
   renderCrossings();
   if (label) document.getElementById('locationStatus').textContent = label;
 }
@@ -951,6 +984,9 @@ async function refreshData() {
   }
 
   renderCrossings();
+
+  // Fetch real driving routes from OSRM (non-blocking, re-renders when done)
+  fetchRoutes().then(() => renderCrossings());
   document.getElementById('lastUpdate').textContent =
     `Оновлено: ${new Date().toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'})}`;
   btn.classList.remove('loading');
