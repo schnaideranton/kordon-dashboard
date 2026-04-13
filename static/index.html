@@ -386,11 +386,11 @@
       </div>
     </div>
     <div class="location-section" style="border-bottom:1px solid var(--border)">
-      <label>Куди</label>
+      <label>Напрямок (куди їдемо)</label>
       <div class="location-input-wrap">
         <div style="flex:1;position:relative">
           <input type="text" class="location-input" id="destInput" style="width:100%"
-                 placeholder="Місто призначення (необов'язково)" value="" autocomplete="off" data-field="to">
+                 placeholder="Варшава, Берлін, Будапешт..." value="" autocomplete="off" data-field="to">
           <div class="search-results" id="destSearchResults"></div>
         </div>
         <button class="geo-btn" style="background:var(--surface2);border:1px solid var(--border);font-size:14px" onclick="clearDest()" title="Очистити">&#10005;</button>
@@ -582,21 +582,23 @@ function totalTimeMinutes(c) {
   const driveTo = driveTimeMinutes(distTo);
   const wait = d ? (d.waitMinutes || 60) : 60;
 
-  // If destination set, add drive from border to destination
-  let driveFrom = 0, distFrom = 0;
+  // Destination is only used for relevance scoring (which crossings are on the way)
+  // We do NOT count drive time after the border
+  let relevance = 0; // lower = more relevant to destination direction
   if (state.destLat != null && state.destLng != null) {
-    distFrom = haversine(c.lat, c.lng, state.destLat, state.destLng);
-    driveFrom = driveTimeMinutes(distFrom);
+    // How much does this crossing lie on the path toward destination?
+    // = distance(origin→crossing) + distance(crossing→dest) vs distance(origin→dest)
+    const directDist = haversine(state.userLat, state.userLng, state.destLat, state.destLng);
+    const viaDist = distTo + haversine(c.lat, c.lng, state.destLat, state.destLng);
+    relevance = viaDist - directDist; // 0 = perfectly on the way, high = big detour
   }
 
-  const totalDist = Math.round(distTo + distFrom);
   return {
-    drive: driveTo, driveTo, driveFrom, wait,
-    total: driveTo + wait + driveFrom,
+    drive: driveTo, wait,
+    total: driveTo + wait,
     distKm: Math.round(distTo),
-    distFromKm: Math.round(distFrom),
-    totalDistKm: totalDist,
     hasDest: state.destLat != null,
+    relevance: Math.round(relevance),
   };
 }
 
@@ -615,13 +617,29 @@ function renderCrossings() {
     ...c, ...totalTimeMinutes(c), data: state.crossingData[c.id] || {},
   }));
 
-  // Sort based on selected mode
-  if (state.sortBy === 'closest') {
-    withTimes.sort((a,b) => a.totalDistKm - b.totalDistKm);
-  } else if (state.sortBy === 'shortest_queue') {
-    withTimes.sort((a,b) => (a.wait||999) - (b.wait||999));
+  if (state.destLat != null) {
+    // With destination: primary sort by relevance (on-the-way first),
+    // tiebreak by selected mode within similar relevance
+    const secondary = state.sortBy === 'closest' ? (a,b) => a.distKm - b.distKm
+      : state.sortBy === 'shortest_queue' ? (a,b) => (a.wait||999) - (b.wait||999)
+      : (a,b) => a.total - b.total;
+
+    withTimes.sort((a,b) => {
+      // Group: 0-30km = on the way, 30-100 = slight detour, 100+ = big detour
+      const grpA = a.relevance < 30 ? 0 : a.relevance < 100 ? 1 : 2;
+      const grpB = b.relevance < 30 ? 0 : b.relevance < 100 ? 1 : 2;
+      if (grpA !== grpB) return grpA - grpB;
+      return secondary(a, b);
+    });
   } else {
-    withTimes.sort((a,b) => a.total - b.total);
+    // Without destination: sort purely by selected mode
+    if (state.sortBy === 'closest') {
+      withTimes.sort((a,b) => a.distKm - b.distKm);
+    } else if (state.sortBy === 'shortest_queue') {
+      withTimes.sort((a,b) => (a.wait||999) - (b.wait||999));
+    } else {
+      withTimes.sort((a,b) => a.total - b.total);
+    }
   }
   const bestId = withTimes.length > 0 ? withTimes[0].id : null;
 
@@ -633,23 +651,23 @@ function renderCrossings() {
     const badgeClass = {green:'best',yellow:'good',orange:'busy',red:'heavy',grey:'closed'}[status];
     const barColor = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
     const barWidth = Math.min(100, (d.waitMinutes||0) / 3);
-    const destInfo = c.hasDest ? `<div style="font-size:11px;color:var(--text2);margin-top:4px">До кордону ${c.distKm} км (${fmt(c.driveTo)}) + після ${c.distFromKm} км (${fmt(c.driveFrom)})</div>` : '';
+    const detourNote = (c.hasDest && c.relevance >= 30) ? `<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.6">${c.relevance < 100 ? 'невеликий крюк' : 'великий крюк'} (+${c.relevance} км)</div>` : '';
     return `
       <div class="crossing-card ${isBest?'recommended':''}" onclick="openDetail('${c.id}')">
         <span class="badge ${badgeClass}">${statusLabel}</span>
         <div class="crossing-name">${c.name}</div>
-        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.hasDest ? c.totalDistKm+' км весь шлях' : c.distKm+' км'}</div>
+        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км до кордону</div>
         <div class="crossing-stats">
           <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
           <div class="stat"><div class="stat-value">${fmt(c.wait)}</div><div class="stat-label">черга</div></div>
-          <div class="stat"><div class="stat-value">${c.hasDest ? fmt(c.total) : fmt(c.drive)}</div><div class="stat-label">${c.hasDest ? 'загалом' : 'дорога'}</div></div>
+          <div class="stat"><div class="stat-value">${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
         </div>
-        ${destInfo}
         <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
+        ${detourNote}
         ${isBest?`<div class="recommendation">&#9733; ${
-          state.sortBy==='closest' ? `Найближче: ${c.hasDest ? c.totalDistKm : c.distKm} км` :
+          state.sortBy==='closest' ? `Найближче: ${c.distKm} км` :
           state.sortBy==='shortest_queue' ? `Найменша черга: ${fmt(c.wait)}` :
-          `Найшвидше: ${fmt(c.total)}${c.hasDest ? ' (весь маршрут)' : ' (дорога + черга)'}`
+          `Найшвидше: ${fmt(c.total)} (дорога + черга)`
         }</div>`:''}
       </div>`;
   }).join('');
@@ -693,16 +711,7 @@ function renderMapMarkers(crossings, bestId) {
       const line1 = L.polyline([[state.userLat,state.userLng],[c.lat,c.lng]], {color,weight:3,dashArray:'10,7',opacity:0.7}).addTo(map);
       routeLines.push(line1);
 
-      // Line: border → destination (if set)
-      if (state.destLat != null) {
-        const line2 = L.polyline([[c.lat,c.lng],[state.destLat,state.destLng]], {color,weight:2,dashArray:'4,8',opacity:0.4}).addTo(map);
-        routeLines.push(line2);
-      }
-
-      // Label on the first segment (user → border)
-      const breakdownParts = state.destLat != null
-        ? `${fmt(c.driveTo)} + ${fmt(c.wait)} + ${fmt(c.driveFrom)}`
-        : `${fmt(c.drive)} дорога + ${fmt(c.wait)} черга`;
+      // Label on the route line (user → border only)
       state._routeLabels.push({
         lat1: state.userLat, lng1: state.userLng,
         lat2: c.lat, lng2: c.lng,
@@ -712,7 +721,6 @@ function renderMapMarkers(crossings, bestId) {
         total: fmt(c.total),
         drive: fmt(c.drive),
         wait: fmt(c.wait),
-        breakdown: breakdownParts,
       });
     }
   });
@@ -766,7 +774,7 @@ function renderRouteLabels() {
     return `<div class="route-label" style="left:${p.x}px;top:${p.y}px;border-color:${p.color}33">
       <span class="rl-name" style="color:${p.color}">${p.name}</span>
       <span class="rl-time" style="color:${p.color}">${p.total}</span>
-      <span class="rl-breakdown" style="color:${p.color}">${p.breakdown || (p.drive+' дорога + '+p.wait+' черга')}</span>
+      <span class="rl-breakdown" style="color:${p.color}">${p.drive} дорога + ${p.wait} черга</span>
     </div>`;
   }).join('');
 }
