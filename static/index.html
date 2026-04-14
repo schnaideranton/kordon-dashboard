@@ -194,7 +194,9 @@
     width: 20px; height: 20px; background: var(--blue);
     border: 3px solid white; border-radius: 50%;
     box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+    cursor: grab;
   }
+  .user-marker:active { cursor: grabbing; }
 
   .map-legend {
     position: absolute; bottom: 20px; right: 20px;
@@ -722,8 +724,14 @@ function renderMapMarkers(crossings, bestId) {
   if (userMarker) map.removeLayer(userMarker);
   userMarker = L.marker([state.userLat, state.userLng], {
     icon: L.divIcon({ className:'', html:'<div class="user-marker"></div>', iconSize:[20,20], iconAnchor:[10,10] }),
-    zIndexOffset: 1000
-  }).addTo(map).bindPopup('<b>Звідки</b>');
+    zIndexOffset: 1000,
+    draggable: true,
+  }).addTo(map).bindPopup('<b>Звідки</b> <small>(перетягніть)</small>');
+  userMarker.on('dragend', function() {
+    const p = userMarker.getLatLng();
+    document.getElementById('locationInput').value = `${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}`;
+    setUserPosition(p.lat, p.lng);
+  });
 
   // Destination marker
   if (state.destLat != null) {
