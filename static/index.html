@@ -602,17 +602,44 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// Fetch real driving routes via backend (proxied OSRM)
+// Fetch real driving routes — try backend proxy, fallback to direct OSRM
 let _lastRoutePos = null;
 async function fetchRoutes() {
   const posKey = `${state.userLat},${state.userLng}`;
   if (_lastRoutePos === posKey && Object.keys(state.routes).length > 0) return;
   _lastRoutePos = posKey;
+  state.routes = {};
+
+  // 1) Try backend proxy (fast, no rate limits)
   try {
     const resp = await fetch(`/api/routes?from_lat=${state.userLat}&from_lng=${state.userLng}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    state.routes = await resp.json();
-  } catch(e) { console.warn('Routes fetch failed:', e); }
+    const data = await resp.json();
+    if (Object.keys(data).length > 0) { state.routes = data; return; }
+  } catch(e) { console.log('Backend routes unavailable, using direct OSRM'); }
+
+  // 2) Fallback: call OSRM directly, one by one with stagger
+  const filtered = CROSSINGS.filter(c => c.types.includes(state.vehicle));
+  for (let i = 0; i < filtered.length; i++) {
+    const c = filtered[i];
+    try {
+      const url = `https://router.project-osrm.org/route/v1/driving/${state.userLng},${state.userLat};${c.lng},${c.lat}?overview=full&geometries=geojson`;
+      const resp = await fetch(url);
+      if (resp.status === 429) {
+        await new Promise(r => setTimeout(r, 3000));
+        i--; continue; // retry
+      }
+      if (!resp.ok) continue;
+      const json = await resp.json();
+      if (json.code === 'Ok' && json.routes.length) {
+        const r = json.routes[0];
+        state.routes[c.id] = { distKm: Math.round(r.distance / 1000), driveMin: Math.round(r.duration / 60), geometry: r.geometry.coordinates };
+      }
+    } catch(e) { /* skip this crossing */ }
+    // Re-render progressively as routes come in
+    if ((i + 1) % 3 === 0 || i === filtered.length - 1) renderCrossings();
+    if (i < filtered.length - 1) await new Promise(r => setTimeout(r, 250));
+  }
 }
 
 function totalTimeMinutes(c) {
@@ -910,6 +937,7 @@ async function setUserPosition(lat, lng, label) {
   state.userLat = lat;
   state.userLng = lng;
   state.routes = {};
+  _lastRoutePos = null; // force refetch
   map.flyTo([lat, lng], 8);
   renderCrossings(); // render immediately with fallback estimates
   await fetchRoutes(); // then update with real routes
