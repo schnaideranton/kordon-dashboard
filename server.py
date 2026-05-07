@@ -486,32 +486,45 @@ async def refresh():
     })
 
 
+async def _osrm_route(client, from_lng, from_lat, to_lng, to_lat):
+    url = f"https://router.project-osrm.org/route/v1/driving/{from_lng},{from_lat};{to_lng},{to_lat}?overview=full&geometries=geojson"
+    try:
+        resp = await client.get(url)
+        if resp.status_code == 429:
+            await asyncio.sleep(1)
+            resp = await client.get(url)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("code") == "Ok" and data.get("routes"):
+                r = data["routes"][0]
+                return {
+                    "distKm": round(r["distance"] / 1000),
+                    "driveMin": round(r["duration"] / 60),
+                    "geometry": r["geometry"]["coordinates"],
+                }
+    except Exception as e:
+        log.warning(f"OSRM failed: {e}")
+    return None
+
+
 @app.get("/api/routes")
-async def get_routes(from_lat: float, from_lng: float):
-    """Fetch OSRM driving routes from origin to all crossings (server-side to avoid CORS/rate-limit)."""
+async def get_routes(from_lat: float, from_lng: float, to_lat: float = None, to_lng: float = None):
+    """Fetch OSRM driving routes: origin→border, and border→destination if to_* provided."""
     routes = {}
+    routes_after = {}
     async with httpx.AsyncClient(timeout=10) as client:
         for cp in CROSSINGS:
             cid, lat, lng = cp["id"], cp["lat"], cp["lng"]
-            url = f"https://router.project-osrm.org/route/v1/driving/{from_lng},{from_lat};{lng},{lat}?overview=full&geometries=geojson"
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 429:
-                    await asyncio.sleep(1)
-                    resp = await client.get(url)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("code") == "Ok" and data.get("routes"):
-                        r = data["routes"][0]
-                        routes[cid] = {
-                            "distKm": round(r["distance"] / 1000),
-                            "driveMin": round(r["duration"] / 60),
-                            "geometry": r["geometry"]["coordinates"],
-                        }
-            except Exception as e:
-                log.warning(f"OSRM failed for {cid}: {e}")
-            await asyncio.sleep(0.15)  # stagger to respect rate limits
-    return JSONResponse(routes)
+            r = await _osrm_route(client, from_lng, from_lat, lng, lat)
+            if r:
+                routes[cid] = r
+            await asyncio.sleep(0.15)
+            if to_lat is not None and to_lng is not None:
+                r2 = await _osrm_route(client, lng, lat, to_lng, to_lat)
+                if r2:
+                    routes_after[cid] = r2
+                await asyncio.sleep(0.15)
+    return JSONResponse({"routes": routes, "routesAfter": routes_after})
 
 
 # ── Serve frontend ─────────────────────────────
