@@ -30,6 +30,7 @@ cache = {
     "poland": {},      # checkpoint_id → polish side data
     "slovakia": {},    # checkpoint_id → slovak side data
     "romania": {},     # checkpoint_id → romanian side data
+    "hungary": {},     # checkpoint_id → hungarian side data
     "last_update": None,
     "errors": [],
 }
@@ -56,8 +57,11 @@ CROSSINGS = [
 ]
 
 # Name matching patterns for DPSU HTML scraping
+# DPSU uses Ukrainian transliteration that differs from common usage:
+#   "Краківець" (not "Краковець"), "Будомєж" (not "Будомеж"), "Кросьценко" (not "Кросценко")
 DPSU_PATTERNS = {
-    "краковець": "krakovets",
+    "краківець": "krakovets",
+    "краковець": "krakovets",  # legacy fallback
     "шегині": "shehyni",
     "рава-руська": "rava_ruska",
     "устилуг": "ustyluh",
@@ -236,46 +240,86 @@ async def scrape_echerha(client: httpx.AsyncClient):
 
 
 async def scrape_poland(client: httpx.AsyncClient):
-    """Scrape granica.gov.pl for Polish side wait times."""
-    results = {}
-
-    # Polish crossing name → our ID
+    """Scrape granica.gov.pl for Polish side wait times.
+    Page has 6 tables; the 1st table for UA border has 9 columns:
+    Dorohusk, Zosin, Dołhobyczów, Hrebenne, Budomierz, Korczowa, Medyka, Malhowice, Krościenko
+    Row 2 = car wait times in 'H:MM' format (e.g. '0:00', '1:30').
+    """
     pl_names = {
+        "dorohusk": "yahodyn",
+        "zosin": "ustyluh",
+        "hrebenne": "rava_ruska",
+        "budomierz": "hrushiv",
         "korczowa": "krakovets",
         "medyka": "shehyni",
-        "hrebenne": "rava_ruska",
-        "zosin": "ustyluh",
-        "dorohusk": "yahodyn",
-        "budomierz": "hrushiv",
         "krościenko": "smilnytsia",
-        "kroscien": "smilnytsia",
+        "krosciensko": "smilnytsia",
     }
+    BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,pl;q=0.8,uk;q=0.7",
+    }
+    results = {}
+
+    def parse_hmm(s):
+        m = re.match(r"\s*(\d+):(\d+)", s.strip())
+        if m:
+            return int(m.group(1)) * 60 + int(m.group(2))
+        return None
 
     for direction, k in [("exit", "w"), ("enter", "wj")]:
         try:
             resp = await client.get(
                 f"https://granica.gov.pl/index_wait.php?p=u&v=en&k={k}",
                 timeout=15,
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers=BROWSER_HEADERS,
             )
             resp.raise_for_status()
-            text = resp.text.lower()
-
-            for pl_name, cid in pl_names.items():
-                if pl_name in text:
-                    # Try to extract wait time near the name
-                    # Pattern: "X:XXh" or "Xh" near the crossing name
-                    idx = text.index(pl_name)
-                    snippet = text[idx:idx+300]
-                    time_match = re.search(r"(\d+):(\d+)\s*h", snippet)
-                    if time_match:
-                        hours = int(time_match.group(1))
-                        mins = int(time_match.group(2))
-                        total_mins = hours * 60 + mins
-                        if cid not in results:
-                            results[cid] = {}
-                        results[cid][f"pl_{direction}"] = total_mins
-
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for table in soup.find_all("table"):
+                txt = table.get_text()
+                if "Korczowa" not in txt or "Medyka" not in txt:
+                    continue
+                rows = table.find_all("tr")
+                # Find header row with crossing names
+                header_idx = None
+                col_to_cid = {}
+                for ri, r in enumerate(rows):
+                    cells = [c.get_text(strip=True).lower() for c in r.find_all(["th", "td"])]
+                    matches = sum(1 for c in cells for pl in pl_names if pl in c)
+                    if matches >= 5:
+                        header_idx = ri
+                        for ci, c in enumerate(cells):
+                            for pl, cid in pl_names.items():
+                                if pl in c:
+                                    col_to_cid[ci] = cid
+                                    break
+                        break
+                if header_idx is None:
+                    continue
+                # Find first row AFTER header that has H:MM values in passenger-cars range
+                # We pick the row where most cells are short H:MM (no truck weight prefix)
+                for r in rows[header_idx + 1:]:
+                    cells = [c.get_text(strip=True) for c in r.find_all(["th", "td"])]
+                    # Skip first 1-2 prefix cells if they don't look like times
+                    short_cells = [c for c in cells if re.fullmatch(r"\s*\d+:\d+\s*", c)]
+                    # Skip rows with truck markers like ">7,5T"
+                    if any(">7,5" in c or "≤7,5" in c for c in cells):
+                        continue
+                    if len(short_cells) >= 5:
+                        # Map by column index (offset for prefix cells)
+                        offset = len(cells) - len(short_cells)
+                        for col_idx, cid in col_to_cid.items():
+                            data_idx = col_idx - offset
+                            if 0 <= data_idx < len(short_cells):
+                                wait = parse_hmm(short_cells[data_idx])
+                                if wait is not None:
+                                    if cid not in results:
+                                        results[cid] = {}
+                                    results[cid][f"pl_{direction}"] = wait
+                        break
+                break  # only first matching UA table
         except Exception as e:
             log.error(f"Poland scrape ({direction}) failed: {e}")
             cache["errors"].append(f"Poland({direction}): {e}")
@@ -291,7 +335,11 @@ async def scrape_slovakia(client: httpx.AsyncClient):
         resp = await client.get(
             "https://www.financnasprava.sk/sk/infoservis/hranicne-priechody",
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "sk,en;q=0.9",
+            },
         )
         resp.raise_for_status()
         text = resp.text.lower()
@@ -315,6 +363,132 @@ async def scrape_slovakia(client: httpx.AsyncClient):
     except Exception as e:
         log.error(f"Slovakia scrape failed: {e}")
         cache["errors"].append(f"Slovakia: {e}")
+        return False
+
+
+async def scrape_romania(client: httpx.AsyncClient):
+    """Scrape politiadefrontiera.ro — data is inline JS array on page.
+    They render markers with title + description containing 'Timp de așteptare X min.'
+    """
+    # Romanian crossing name → our ID. Their names use diacritics.
+    ro_names = {
+        "halmeu": "dyakove",          # Halmeu — Дякове
+        "siret": "porubne",           # Siret — Порубне
+        "sighetu marmației": "solotvyno",  # Sighetu — Солотвино
+        "sighetul marmatiei": "solotvyno",
+    }
+    results = {}
+    BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ro,en;q=0.9",
+    }
+    # vt=1 cars, dt=2 exit (UA→RO direction has dt=1 for entry to RO)
+    for direction, dt in [("exit", "1"), ("enter", "2")]:
+        try:
+            resp = await client.get(
+                f"https://www.politiadefrontiera.ro/ro/traficonline/?vt=1&dt={dt}",
+                timeout=15,
+                headers=BROWSER_HEADERS,
+            )
+            resp.raise_for_status()
+            html = resp.text
+            # Markers are JS objects: {"title": 'Halmeu', ... "description": '...Timp de așteptare 39 min...'}
+            # Find each marker block
+            import re
+            blocks = re.findall(r'\{\s*"title":\s*\'([^\']+)\'.*?"description":\s*\'(.*?)\',', html, re.DOTALL)
+            for title, desc in blocks:
+                key = title.lower()
+                cid = None
+                for ro_name, our_id in ro_names.items():
+                    if ro_name in key:
+                        cid = our_id
+                        break
+                if not cid:
+                    continue
+                # Extract wait: "Timp de așteptare 39 min"
+                m = re.search(r"timp de a[șs]teptare\s+(\d+)\s*min", desc, re.IGNORECASE)
+                if m:
+                    wait = int(m.group(1))
+                    if cid not in results:
+                        results[cid] = {}
+                    results[cid][f"ro_{direction}"] = wait
+        except Exception as e:
+            log.error(f"Romania scrape ({direction}) failed: {e}")
+            cache["errors"].append(f"Romania({direction}): {e}")
+    cache["romania"] = results
+    log.info(f"Romania: scraped {len(results)} crossings")
+    return len(results) > 0
+
+
+async def scrape_hungary(client: httpx.AsyncClient):
+    """Best-effort: parse text bulletin from police.hu.
+    Returns wait minutes for any of 3 named crossings if mentioned."""
+    hu_names = {
+        "tisz": "tysa",          # Tisza/Tiszabecs near Tisa
+        "tiszabecs": "tysa",
+        "záhony": "chop",         # Záhony — Чоп
+        "zahony": "chop",
+        "beregsuran": "yahodyn",  # Closest to Beregsurány — but not in our list directly
+    }
+    # we only map to our crossings. Beregsurány doesn't match our list cleanly; skip.
+    hu_names = {"tiszabecs": "tysa", "tisz": "tysa", "záhony": "chop", "zahony": "chop"}
+    results = {}
+    BROWSER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,*/*;q=0.8",
+        "Accept-Language": "en,hu;q=0.8",
+    }
+    try:
+        resp = await client.get(
+            "https://www.police.hu/en/content/border-traffic-situation-at-the-hungarian-ukrainian-border",
+            timeout=15,
+            headers=BROWSER_HEADERS,
+        )
+        resp.raise_for_status()
+        text = re.sub(r"<[^>]+>", " ", resp.text).lower()
+        text = re.sub(r"\s+", " ", text)
+        # find segments with crossing names + wait patterns
+        # Patterns: "X hour", "X hours", "X minutes", "two hours"
+        word2num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8}
+        for hu_name, cid in hu_names.items():
+            idx = text.find(hu_name)
+            if idx < 0:
+                continue
+            seg = text[max(0, idx-100):idx+400]
+            wait_min = None
+            # numeric hours
+            m = re.search(r"(\d+)\s*hour", seg)
+            if m:
+                wait_min = int(m.group(1)) * 60
+            # word hours
+            if wait_min is None:
+                for w, n in word2num.items():
+                    if re.search(rf"\b{w}\s+hour", seg):
+                        wait_min = n * 60
+                        break
+            # minutes
+            if wait_min is None:
+                m = re.search(r"(\d+)\s*minute", seg)
+                if m:
+                    wait_min = int(m.group(1))
+            # phrase "less than 15 minutes" → ~10
+            if wait_min is None and "less than 15 minute" in seg:
+                wait_min = 10
+            # phrase "normal" → ~20
+            if wait_min is None and ("normal" in seg or "usual" in seg):
+                wait_min = 20
+            if wait_min is not None:
+                if cid not in results:
+                    results[cid] = {}
+                # use as estimate
+                results[cid]["hu_wait"] = wait_min
+        cache["hungary"] = results
+        log.info(f"Hungary: scraped {len(results)} crossings")
+        return len(results) > 0
+    except Exception as e:
+        log.error(f"Hungary scrape failed: {e}")
+        cache["errors"].append(f"Hungary: {e}")
         return False
 
 
@@ -383,10 +557,24 @@ def merge_data():
             entry["skWaitMinutes"] = sk.get("sk_wait")
             entry["sources"].append("financnasprava.sk")
 
+        # Romania
+        ro = cache["romania"].get(cid)
+        if ro:
+            entry["roExitMinutes"] = ro.get("ro_exit")
+            entry["roEnterMinutes"] = ro.get("ro_enter")
+            entry["sources"].append("politiadefrontiera.ro")
+
+        # Hungary (best-effort text parsing)
+        hu = cache["hungary"].get(cid)
+        if hu:
+            entry["huWaitMinutes"] = hu.get("hu_wait")
+            entry["sources"].append("police.hu")
+
         # If no DPSU data but have other sources, estimate status
         if entry["waitMinutes"] is None:
-            # Try Polish data
-            pw = entry.get("plExitMinutes") or entry.get("skWaitMinutes")
+            # Try other-side data in priority order
+            pw = (entry.get("plExitMinutes") or entry.get("skWaitMinutes")
+                  or entry.get("roExitMinutes") or entry.get("huWaitMinutes"))
             if pw:
                 entry["waitMinutes"] = pw
 
@@ -420,6 +608,8 @@ async def scrape_all():
             scrape_echerha(client),
             scrape_poland(client),
             scrape_slovakia(client),
+            scrape_romania(client),
+            scrape_hungary(client),
             return_exceptions=True,
         )
         for i, r in enumerate(results):
@@ -459,6 +649,8 @@ async def get_crossings():
             "echerha": len(cache["echerha"]) > 0,
             "poland": len(cache["poland"]) > 0,
             "slovakia": len(cache["slovakia"]) > 0,
+            "romania": len(cache["romania"]) > 0,
+            "hungary": len(cache["hungary"]) > 0,
         },
         "errors": cache["errors"][-10:],  # Last 10 errors
     })
@@ -482,6 +674,8 @@ async def refresh():
             "echerha": len(cache["echerha"]) > 0,
             "poland": len(cache["poland"]) > 0,
             "slovakia": len(cache["slovakia"]) > 0,
+            "romania": len(cache["romania"]) > 0,
+            "hungary": len(cache["hungary"]) > 0,
         },
     })
 

@@ -424,8 +424,10 @@
     <div class="sources-bar" id="sourcesBar">
       <span><span class="source-dot offline" id="srcDpsu"></span>ДПСУ</span>
       <span><span class="source-dot offline" id="srcEcherha"></span>eCherha</span>
-      <span><span class="source-dot offline" id="srcPoland"></span>granica.gov.pl</span>
-      <span><span class="source-dot offline" id="srcSlovakia"></span>financnasprava.sk</span>
+      <span><span class="source-dot offline" id="srcPoland"></span>PL</span>
+      <span><span class="source-dot offline" id="srcSlovakia"></span>SK</span>
+      <span><span class="source-dot offline" id="srcRomania"></span>RO</span>
+      <span><span class="source-dot offline" id="srcHungary"></span>HU</span>
     </div>
   </aside>
 
@@ -607,6 +609,8 @@ async function fetchFromAPI() {
     document.getElementById('srcEcherha').className = `source-dot ${src.echerha ? 'online' : 'offline'}`;
     document.getElementById('srcPoland').className = `source-dot ${src.poland ? 'online' : 'offline'}`;
     document.getElementById('srcSlovakia').className = `source-dot ${src.slovakia ? 'online' : 'offline'}`;
+    document.getElementById('srcRomania').className = `source-dot ${src.romania ? 'online' : 'offline'}`;
+    document.getElementById('srcHungary').className = `source-dot ${src.hungary ? 'online' : 'offline'}`;
 
     // Check if we got any real data
     const crossings = json.crossings || {};
