@@ -301,8 +301,10 @@
     transition: top 0.15s, left 0.15s;
   }
   .route-label .rl-name { font-weight: 700; font-size: 12px; display: block; }
-  .route-label .rl-time { font-size: 14px; font-weight: 800; display: block; }
-  .route-label .rl-breakdown { display: block; font-size: 10px; opacity: 0.6; }
+  .route-label .rl-time { font-size: 15px; font-weight: 800; display: block; line-height: 1.1; margin: 2px 0 4px; }
+  .route-label .rl-breakdown { display: flex; flex-direction: column; gap: 1px; font-size: 11px; line-height: 1.3; }
+  .route-label .rl-line { font-weight: 600; }
+  .route-label .rl-tag { font-weight: 400; opacity: 0.65; font-size: 10px; }
 
   .search-results {
     display: none;
@@ -740,6 +742,13 @@ function fmt(min) {
   const h = Math.floor(min/60), m = min%60;
   return m > 0 ? `${h} год ${m} хв` : `${h} год`;
 }
+// Compact h:mm format for map labels: "5 h : 50 min" / "13 min"
+function fmtHM(min) {
+  if (min == null) return '—';
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min/60), m = min%60;
+  return `${h} h : ${String(m).padStart(2,'0')} min`;
+}
 
 // ── Render ──
 function renderCrossings() {
@@ -775,6 +784,9 @@ function renderCrossings() {
   }
   // Best = first open crossing (skip closed)
   const bestId = (withTimes.find(c => c.data.isOpen !== false) || {}).id || null;
+  // Top-3 open crossings get the route colors used on the map
+  const openTop3 = withTimes.filter(c => c.data.isOpen !== false).slice(0, 3).map(c => c.id);
+  const ROUTE_COLORS = ['#22c55e', '#eab308', '#6366f1'];
 
   list.innerHTML = withTimes.map((c) => {
     const d = c.data;
@@ -785,6 +797,9 @@ function renderCrossings() {
     const barColor = {green:'var(--green)',yellow:'var(--yellow)',orange:'var(--orange)',red:'var(--red)',grey:'#555'}[status];
     const barWidth = Math.min(100, (d.waitMinutes||0) / 3);
     const isClosed = d.isOpen === false;
+    const routeIdx = openTop3.indexOf(c.id);
+    // Use the route color (matches map line) so total stands out, fallback to white for non-top-3
+    const totalColor = routeIdx >= 0 ? ROUTE_COLORS[routeIdx] : '#ffffff';
     const detourNote = (c.hasDest && c.relevance >= 30) ? `<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.6">${c.relevance < 100 ? 'невеликий крюк' : 'великий крюк'} (+${c.relevance} км)</div>` : '';
     const breakdown = c.hasDest
       ? `<div class="time-breakdown">
@@ -793,7 +808,7 @@ function renderCrossings() {
           <div class="seg"><span class="seg-label">черга</span><span class="seg-value ${status}">${fmt(c.wait)}</span></div>
           <div class="seg-sep">+</div>
           <div class="seg"><span class="seg-label">після кордону</span><span class="seg-value">${fmt(c.driveAfter)}</span><span class="seg-meta">${c.distAfter} км</span></div>
-          <div class="seg-total">= <b>${fmt(c.total)}</b></div>
+          <div class="seg-total">= <b style="color:${totalColor}">${fmt(c.total)}</b></div>
          </div>`
       : `<div class="crossing-stats">
           <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
@@ -896,9 +911,11 @@ function renderMapMarkers(crossings, bestId) {
         t: 0.5,
         color: color,
         name: c.name.split('—')[0].trim(),
-        total: fmt(c.total),
-        drive: fmt(c.drive),
-        wait: fmt(c.wait),
+        totalHM: fmtHM(c.total),
+        driveHM: fmtHM(c.drive),
+        waitHM: fmtHM(c.wait),
+        driveAfterHM: fmtHM(c.driveAfter),
+        hasDest: c.hasDest,
       });
     }
   });
@@ -949,10 +966,15 @@ function renderRouteLabels() {
   }
 
   overlay.innerHTML = positions.map(p => {
+    const parts = [
+      `<span class="rl-line">${p.driveHM} <span class="rl-tag">до кордону</span></span>`,
+      `<span class="rl-line">${p.waitHM} <span class="rl-tag">черга</span></span>`,
+    ];
+    if (p.hasDest) parts.push(`<span class="rl-line">${p.driveAfterHM} <span class="rl-tag">після кордону</span></span>`);
     return `<div class="route-label" style="left:${p.x}px;top:${p.y}px;border-color:${p.color}33">
       <span class="rl-name" style="color:${p.color}">${p.name}</span>
-      <span class="rl-time" style="color:${p.color}">${p.total}</span>
-      <span class="rl-breakdown" style="color:${p.color}">${p.drive} дорога + ${p.wait} черга</span>
+      <span class="rl-time" style="color:${p.color}">${p.totalHM}</span>
+      <div class="rl-breakdown" style="color:${p.color}">${parts.join('')}</div>
     </div>`;
   }).join('');
 }
