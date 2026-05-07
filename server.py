@@ -298,27 +298,35 @@ async def scrape_poland(client: httpx.AsyncClient):
                         break
                 if header_idx is None:
                     continue
-                # Find first row AFTER header that has H:MM values in passenger-cars range
-                # We pick the row where most cells are short H:MM (no truck weight prefix)
+                # Find passenger-cars row. Skip truck rows with weight markers ">7,5T".
+                # Some cells may be plain "0" without H:MM colon — treat as 0.
+                def cell_to_min(s):
+                    s = s.strip()
+                    if re.fullmatch(r"\d+:\d+", s):
+                        h, mm = s.split(":")
+                        return int(h) * 60 + int(mm)
+                    if re.fullmatch(r"\d+", s):
+                        return int(s)  # bare integer = minutes
+                    return None
+
                 for r in rows[header_idx + 1:]:
                     cells = [c.get_text(strip=True) for c in r.find_all(["th", "td"])]
-                    # Skip first 1-2 prefix cells if they don't look like times
-                    short_cells = [c for c in cells if re.fullmatch(r"\s*\d+:\d+\s*", c)]
-                    # Skip rows with truck markers like ">7,5T"
                     if any(">7,5" in c or "≤7,5" in c for c in cells):
                         continue
-                    if len(short_cells) >= 5:
-                        # Map by column index (offset for prefix cells)
-                        offset = len(cells) - len(short_cells)
-                        for col_idx, cid in col_to_cid.items():
-                            data_idx = col_idx - offset
-                            if 0 <= data_idx < len(short_cells):
-                                wait = parse_hmm(short_cells[data_idx])
-                                if wait is not None:
-                                    if cid not in results:
-                                        results[cid] = {}
-                                    results[cid][f"pl_{direction}"] = wait
-                        break
+                    # Identify columns that contain valid time/number values
+                    parsed = [cell_to_min(c) for c in cells]
+                    valid_count = sum(1 for v in parsed if v is not None)
+                    if valid_count < 5:
+                        continue
+                    # First valid column = data start. Map header column 0 to first valid index.
+                    first_valid = next(i for i, v in enumerate(parsed) if v is not None)
+                    for col_idx, cid in col_to_cid.items():
+                        data_idx = first_valid + col_idx
+                        if 0 <= data_idx < len(parsed) and parsed[data_idx] is not None:
+                            if cid not in results:
+                                results[cid] = {}
+                            results[cid][f"pl_{direction}"] = parsed[data_idx]
+                    break
                 break  # only first matching UA table
         except Exception as e:
             log.error(f"Poland scrape ({direction}) failed: {e}")
@@ -570,13 +578,45 @@ def merge_data():
             entry["huWaitMinutes"] = hu.get("hu_wait")
             entry["sources"].append("police.hu")
 
-        # If no DPSU data but have other sources, estimate status
-        if entry["waitMinutes"] is None:
-            # Try other-side data in priority order
-            pw = (entry.get("plExitMinutes") or entry.get("skWaitMinutes")
-                  or entry.get("roExitMinutes") or entry.get("huWaitMinutes"))
-            if pw:
-                entry["waitMinutes"] = pw
+        # ── Two-sided wait: UA exit (DPSU) + EU entry (host country) ──
+        # For UA→EU travel: queue at Ukrainian checkpoint + queue at EU checkpoint.
+        # `pl_enter` is the wait to ENTER Poland (UA→PL); same for ro_enter etc.
+        ua_wait = entry["waitMinutes"]  # from DPSU (Ukrainian side)
+        # `or` would treat 0 as falsy and skip valid zero waits — use first-not-None
+        def first_not_none(*vals):
+            for v in vals:
+                if v is not None:
+                    return v
+            return None
+        # Note: granica.gov.pl only publishes pl_exit (PL→UA direction).
+        # Use it as the best PL-side estimate for either direction since
+        # cross-border congestion is largely symmetric in real time.
+        eu_wait = first_not_none(
+            entry.get("plEnterMinutes"),
+            entry.get("plExitMinutes"),
+            entry.get("roEnterMinutes"),
+            entry.get("huWaitMinutes"),
+            entry.get("skWaitMinutes"),
+        )
+        eu_wait_exit = first_not_none(
+            entry.get("plExitMinutes"),
+            entry.get("roExitMinutes"),
+            entry.get("huWaitMinutes"),
+            entry.get("skWaitMinutes"),
+        )
+
+        entry["uaWaitMinutes"] = ua_wait
+        entry["euWaitMinutes"] = eu_wait
+        entry["euExitMinutes"] = eu_wait_exit
+
+        # Combined wait for default UA→EU travel: sum both sides if available
+        if ua_wait is not None and eu_wait is not None:
+            entry["waitMinutes"] = ua_wait + eu_wait
+        elif ua_wait is not None:
+            entry["waitMinutes"] = ua_wait
+        elif eu_wait is not None:
+            entry["waitMinutes"] = eu_wait
+        # else: stays None
 
         if entry["waitMinutes"] is not None:
             wm = entry["waitMinutes"]
