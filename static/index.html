@@ -72,6 +72,32 @@
 
   .last-update { font-size: 12px; color: var(--text2); }
 
+  .info-chip {
+    background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.4);
+    color: #f59e0b; padding: 5px 12px; border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 600; white-space: nowrap; transition: all 0.2s;
+  }
+  .info-chip:hover { background: rgba(245,158,11,0.22); }
+  .info-chip .chip-short { display: none; }
+
+  .info-panel { width: 540px; max-width: 92vw; }
+  .info-panel h2 { font-size: 20px; margin-bottom: 6px; }
+  .info-lead { color: var(--text); font-size: 14px; margin-bottom: 16px; }
+  .info-list { list-style: none; display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+  .info-list li {
+    font-size: 13px; line-height: 1.5; color: var(--text2);
+    padding-left: 22px; position: relative;
+  }
+  .info-list li::before { content: '•'; position: absolute; left: 6px; color: var(--accent); font-weight: 700; }
+  .info-list li b { color: var(--text); }
+  .info-cta {
+    background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.35);
+    border-radius: 12px; padding: 14px 16px; font-size: 13px; line-height: 1.55;
+    color: var(--text); margin-bottom: 14px;
+  }
+  .info-cta b { color: var(--accent); }
+  .info-sources { font-size: 10px; color: var(--text2); line-height: 1.5; opacity: 0.7; }
+
   .sidebar {
     background: var(--surface);
     border-right: 1px solid var(--border);
@@ -155,6 +181,10 @@
 
   .crossing-name { font-size: 15px; font-weight: 600; margin-bottom: 2px; padding-right: 60px; }
   .crossing-country { font-size: 12px; color: var(--text2); margin-bottom: 10px; }
+  .country-swatch {
+    display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+    margin-right: 5px; vertical-align: middle;
+  }
 
   .stale-badge {
     display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 600;
@@ -336,7 +366,17 @@
       display: flex; flex-direction: column;
       height: auto; min-height: 100vh;
     }
-    .header { flex-shrink: 0; position: sticky; top: 0; z-index: 1000; }
+    .header {
+      flex-shrink: 0; position: sticky; top: 0; z-index: 1000;
+      padding: 0 12px; gap: 8px;
+    }
+    .header h1 { font-size: 16px; }
+    .header-controls { gap: 8px; }
+    .info-chip { padding: 6px 10px; font-size: 12px; }
+    .info-chip .chip-full { display: none; }
+    .info-chip .chip-short { display: inline; }
+    .last-update { display: none; }            /* freshness shown on cards instead */
+    .refresh-btn { padding: 8px 12px; }        /* bigger tap target */
 
     .map-container {
       order: 2; height: 50vh; min-height: 300px;
@@ -384,8 +424,9 @@
   <header class="header">
     <h1><span>&#9632;</span> КОРДОН <span class="data-mode sim" id="dataMode">SIM</span></h1>
     <div class="header-controls">
+      <button class="info-chip" onclick="openInfo()" title="Як читати цю карту">&#9888;<span class="chip-full"> Орієнтовно — як це працює</span><span class="chip-short"> Інфо</span></button>
       <span class="last-update" id="lastUpdate">Оновлення...</span>
-      <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">&#8635; Оновити</button>
+      <button class="refresh-btn" id="refreshBtn" onclick="refreshData()">&#8635;<span class="btn-label"> Оновити</span></button>
     </div>
   </header>
 
@@ -449,12 +490,36 @@
       <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div> Завантажено (90-180 хв)</div>
       <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> Критично (&gt;3 год)</div>
       <div class="legend-item"><div class="legend-dot" style="background:#555"></div> Закрито</div>
+      <h4 style="margin-top:12px">Кордон (колір кільця)</h4>
+      <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div> 🇵🇱 Польща</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div> 🇸🇰 Словаччина</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div> 🇭🇺 Угорщина</div>
+      <div class="legend-item"><div class="legend-dot" style="background:#ec4899"></div> 🇷🇴 Румунія</div>
     </div>
   </div>
 </div>
 
 <div class="detail-overlay" id="detailOverlay" onclick="if(event.target===this)closeDetail()">
   <div class="detail-panel" id="detailPanel"></div>
+</div>
+
+<div class="detail-overlay" id="infoOverlay" onclick="if(event.target===this)closeInfo()">
+  <div class="detail-panel info-panel">
+    <button class="close-detail" onclick="closeInfo()">✕</button>
+    <h2>Як читати цю карту</h2>
+    <p class="info-lead">Це інструмент для <b>попереднього</b> рішення — куди їхати. Не остаточна істина.</p>
+    <ul class="info-list">
+      <li><b>Дані офіційні</b> — з прикордонних служб: ДПСУ та єЧерга (Україна), а також PL, SK, RO, HU. Але вони <b>можуть протухати</b> — дивіться позначку «⚠ дані N тому» на картці.</li>
+      <li><b>Це не магія.</b> Карта просто швидко збирає те, що ви й самі знайшли б, обходячи всі ці сайти вручну. Економить час — не більше.</li>
+      <li><b>Точність не 100%.</b> Черга змінюється щохвилини; цифри — орієнтир, а не гарантія.</li>
+      <li><b>Двостороння черга:</b> показуємо чергу і на українському боці, і на боці ЄС — бо часто стоять саме «всередині».</li>
+    </ul>
+    <div class="info-cta">
+      <b>Головне правило</b><br>
+      Обрали напрямок тут → <b>уточніть обстановку в людей на місці</b>: групові чати в соцмережах, чати водіїв і перевізників у месенджерах. Вони бачать ситуацію в реальному часі. Рішення і відповідальність — на вас.
+    </div>
+    <p class="info-sources">Джерела: dpsu.gov.ua · echerha.gov.ua · granica.gov.pl · financnasprava.sk · politiadefrontiera.ro · police.hu · маршрути OSRM · карта OpenStreetMap</p>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -569,6 +634,9 @@ fetch('https://nominatim.openstreetmap.org/search?country=Ukraine&polygon_geojso
 
 const FLAGS = { PL: '\u{1F1F5}\u{1F1F1}', SK: '\u{1F1F8}\u{1F1F0}', HU: '\u{1F1ED}\u{1F1FA}', RO: '\u{1F1F7}\u{1F1F4}' };
 const COUNTRY_NAMES = { PL: 'Польща', SK: 'Словаччина', HU: 'Угорщина', RO: 'Румунія' };
+// Per-country accent tints so PL/SK/HU/RO are visually distinguishable.
+// Deliberately avoid the status hues (green/yellow/orange/red) to prevent confusion.
+const COUNTRY_COLOR = { PL: '#3b82f6', SK: '#14b8a6', HU: '#a855f7', RO: '#ec4899' };
 
 // ── Simulated data (fallback when no backend) ──
 function generateSimData() {
@@ -895,11 +963,13 @@ function renderCrossings() {
          </div>`;
     const staleBadge = (!isClosed && c.stale && c.ageMinutes != null)
       ? `<span class="stale-badge" title="Дані застарілі">⚠ ${fmtAge(c.ageMinutes)}</span>` : '';
+    const ct = COUNTRY_COLOR[c.country] || '#888';   // per-country accent tint
+    const cardBg = `background:linear-gradient(90deg, ${ct}24, ${ct}08 45%, transparent 70%), var(--surface2);`;
     return `
-      <div class="crossing-card ${isBest?'recommended':''} ${c.stale&&!isClosed?'is-stale':''}" style="${isClosed?'opacity:0.5':''}" onclick="openDetail('${c.id}')">
+      <div class="crossing-card ${isBest?'recommended':''} ${c.stale&&!isClosed?'is-stale':''}" style="${isClosed?'opacity:0.5;':''}${cardBg}border-left:3px solid ${ct};" onclick="openDetail('${c.id}')">
         <span class="badge ${badgeClass}">${statusLabel}</span>
         <div class="crossing-name">${c.name}${isClosed?' <span style="color:#ef4444;font-size:11px;font-weight:400">(тимчасово закритий)</span>':''}${staleBadge}</div>
-        <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км до кордону</div>
+        <div class="crossing-country"><span class="country-swatch" style="background:${ct}"></span>${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км до кордону</div>
         ${breakdown}
         <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
         ${detourNote}
@@ -948,9 +1018,11 @@ function renderMapMarkers(crossings, bestId) {
   crossings.forEach((c) => {
     const d = c.data, status = d.status||'grey', count = d.cars!=null?d.cars:'?';
     const isClosed = d.isOpen === false;
+    const ct = COUNTRY_COLOR[c.country] || '#888';   // country halo ring
+    const ring = `box-shadow:0 0 0 3px ${ct}, 0 2px 8px rgba(0,0,0,0.5);`;
     const m = L.marker([c.lat, c.lng], {
-      icon: L.divIcon({ className:'', html:`<div class="border-marker status-${status}">${count}</div>`, iconSize:[36,36], iconAnchor:[18,18] })
-    }).addTo(map).bindPopup(`<b>${c.name}</b>${isClosed?' (тимчасово закритий)':''}<br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Загалом: ${fmt(c.total)}`);
+      icon: L.divIcon({ className:'', html:`<div class="border-marker status-${status}" style="${ring}">${count}</div>`, iconSize:[36,36], iconAnchor:[18,18] })
+    }).addTo(map).bindPopup(`<b>${FLAGS[c.country]} ${c.name}</b>${isClosed?' (тимчасово закритий)':''}<br>Авто: ${count} · Черга: ${fmt(c.wait)}<br>Загалом: ${fmt(c.total)}`);
     m.on('click', () => openDetail(c.id));
     markers[c.id] = m;
 
@@ -1107,6 +1179,18 @@ function openDetail(id) {
 }
 
 function closeDetail() { document.getElementById('detailOverlay').classList.remove('open'); }
+
+function openInfo() { document.getElementById('infoOverlay').classList.add('open'); }
+function closeInfo() {
+  document.getElementById('infoOverlay').classList.remove('open');
+  try { localStorage.setItem('kordon.infoSeen', '1'); } catch(e) {}
+}
+// Auto-show the disclaimer once on first visit
+(function firstRunInfo() {
+  let seen = false;
+  try { seen = localStorage.getItem('kordon.infoSeen') === '1'; } catch(e) {}
+  if (!seen) setTimeout(openInfo, 700);
+})();
 
 // ── Controls ──
 
@@ -1268,6 +1352,7 @@ document.addEventListener('click', (e) => {
 });
 
 // ── Refresh ──
+let _coldStartRetries = 0;
 async function refreshData() {
   const btn = document.getElementById('refreshBtn');
   btn.classList.add('loading');
@@ -1283,6 +1368,22 @@ async function refreshData() {
     const dm = document.getElementById('dataMode');
     dm.textContent = 'SIM';
     dm.className = 'data-mode sim';
+  }
+
+  // Cold-start guard: on Render the backend may still be mid first-scrape when
+  // the page loads, returning crossings with null values. If data looks too
+  // sparse, retry a few times before settling instead of caching emptiness 5 min.
+  if (state.isLive) {
+    const withWait = Object.values(state.crossingData).filter(c => c.waitMinutes != null).length;
+    if (withWait < 3 && _coldStartRetries < 5) {
+      _coldStartRetries++;
+      btn.classList.remove('loading');
+      btn.innerHTML = '&#8635; Оновити';
+      renderCrossings();
+      setTimeout(refreshData, 4000);
+      return;
+    }
+    _coldStartRetries = 0;
   }
 
   renderCrossings();
@@ -1325,7 +1426,7 @@ async function refreshData() {
 
 refreshData();
 setInterval(refreshData, 5 * 60 * 1000);
-document.addEventListener('keydown', e => { if(e.key==='Escape') closeDetail(); });
+document.addEventListener('keydown', e => { if(e.key==='Escape'){ closeDetail(); closeInfo(); } });
 </script>
 </body>
 </html>
