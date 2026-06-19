@@ -156,6 +156,13 @@
   .crossing-name { font-size: 15px; font-weight: 600; margin-bottom: 2px; padding-right: 60px; }
   .crossing-country { font-size: 12px; color: var(--text2); margin-bottom: 10px; }
 
+  .stale-badge {
+    display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 600;
+    color: #f59e0b; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3);
+    padding: 1px 6px; border-radius: 4px; vertical-align: middle; white-space: nowrap;
+  }
+  .crossing-card.is-stale { border-left: 2px solid rgba(245,158,11,0.5); }
+
   .crossing-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
   .stat { text-align: center; }
   .stat-value { font-size: 20px; font-weight: 700; line-height: 1.2; }
@@ -540,6 +547,8 @@ let state = {
   destLng: null,
   destName: null,
   isLive: false,
+  lastUpdate: null,
+  routesLoading: false,
 };
 
 const map = L.map('map', { center: [49.5, 24], zoom: 7, zoomControl: false, attributionControl: false });
@@ -596,21 +605,26 @@ function generateSimData() {
   return data;
 }
 
+function setSourceDots(src) {
+  const ids = {srcDpsu:'dpsu', srcEcherha:'echerha', srcPoland:'poland',
+               srcSlovakia:'slovakia', srcRomania:'romania', srcHungary:'hungary'};
+  for (const [el, key] of Object.entries(ids)) {
+    const node = document.getElementById(el);
+    if (node) node.className = `source-dot ${src && src[key] ? 'online' : 'offline'}`;
+  }
+}
+
 // ── Fetch from backend API ──
 async function fetchFromAPI() {
+  // Reset dots to offline first so a failed/partial fetch can't leave stale "online"
+  setSourceDots(null);
   try {
     const resp = await fetch('/api/crossings');
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const json = await resp.json();
 
-    // Update source indicators
-    const src = json.sources || {};
-    document.getElementById('srcDpsu').className = `source-dot ${src.dpsu ? 'online' : 'offline'}`;
-    document.getElementById('srcEcherha').className = `source-dot ${src.echerha ? 'online' : 'offline'}`;
-    document.getElementById('srcPoland').className = `source-dot ${src.poland ? 'online' : 'offline'}`;
-    document.getElementById('srcSlovakia').className = `source-dot ${src.slovakia ? 'online' : 'offline'}`;
-    document.getElementById('srcRomania').className = `source-dot ${src.romania ? 'online' : 'offline'}`;
-    document.getElementById('srcHungary').className = `source-dot ${src.hungary ? 'online' : 'offline'}`;
+    setSourceDots(json.sources || {});
+    state.lastUpdate = json.lastUpdate || null;
 
     // Check if we got any real data
     const crossings = json.crossings || {};
@@ -639,67 +653,82 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// Direct OSRM call helper
-async function osrmRoute(fromLng, fromLat, toLng, toLat) {
-  const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=full&geometries=geojson`;
-  const resp = await fetch(url);
-  if (resp.status === 429) { await new Promise(r => setTimeout(r, 3000)); return osrmRoute(fromLng, fromLat, toLng, toLat); }
-  if (!resp.ok) return null;
-  const json = await resp.json();
-  if (json.code !== 'Ok' || !json.routes.length) return null;
-  const r = json.routes[0];
-  return { distKm: Math.round(r.distance / 1000), driveMin: Math.round(r.duration / 60), geometry: r.geometry.coordinates };
+// Direct OSRM call helper (capped retries to avoid infinite recursion on throttle)
+async function osrmRoute(fromLng, fromLat, toLng, toLat, attempt = 0) {
+  const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=simplified&geometries=geojson`;
+  try {
+    const resp = await fetch(url);
+    if (resp.status === 429) {
+      if (attempt >= 2) return null;
+      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      return osrmRoute(fromLng, fromLat, toLng, toLat, attempt + 1);
+    }
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    if (json.code !== 'Ok' || !json.routes.length) return null;
+    const r = json.routes[0];
+    return { distKm: Math.round(r.distance / 1000), driveMin: Math.round(r.duration / 60), geometry: r.geometry.coordinates };
+  } catch(e) { return null; }
 }
 
 // Fetch real driving routes (origin → border, and border → destination if set)
 let _lastRoutePos = null;
 let _lastDestPos = null;
+let _routeToken = 0; // bumps on every call so stale async results are discarded
 async function fetchRoutes() {
   const posKey = `${state.userLat},${state.userLng}`;
   const destKey = state.destLat != null ? `${state.destLat},${state.destLng}` : 'none';
   if (_lastRoutePos === posKey && _lastDestPos === destKey && Object.keys(state.routes).length > 0) return;
-  _lastRoutePos = posKey; _lastDestPos = destKey;
+
+  const token = ++_routeToken;
+  const fresh = () => token === _routeToken; // are we still the latest request?
   state.routes = {};
   state.routesAfter = {};
+  state.routesLoading = true;
 
-  // 1) Try backend proxy (fast, no rate limits)
+  // 1) Try backend proxy (fast, no rate limits, parallel)
   try {
     let url = `/api/routes?from_lat=${state.userLat}&from_lng=${state.userLng}`;
     if (state.destLat != null) url += `&to_lat=${state.destLat}&to_lng=${state.destLng}`;
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
+    if (!fresh()) return; // a newer request superseded us — drop these results
     if (data.routes && Object.keys(data.routes).length > 0) {
       state.routes = data.routes;
       state.routesAfter = data.routesAfter || {};
+      state.routesLoading = false;
+      _lastRoutePos = posKey; _lastDestPos = destKey;
       return;
-    }
-    // Old backend response shape: just dict of routes
-    if (Object.keys(data).length > 0 && data.distKm === undefined) {
-      state.routes = data;
-      // backend doesn't have routesAfter — fall through to compute it directly if dest set
-      if (state.destLat == null) return;
     }
   } catch(e) { console.log('Backend routes unavailable, using direct OSRM'); }
 
-  // 2) Fallback: call OSRM directly, one by one with stagger
-  const filtered = CROSSINGS.filter(c => c.types.includes(state.vehicle));
+  if (!fresh()) return;
+
+  // 2) Fallback: direct OSRM, staggered. Skip closed crossings to save quota.
+  const filtered = CROSSINGS.filter(c =>
+    c.types.includes(state.vehicle) &&
+    (state.crossingData[c.id]?.isOpen !== false));
   for (let i = 0; i < filtered.length; i++) {
+    if (!fresh()) return; // abandon if user changed origin/dest mid-loop
     const c = filtered[i];
-    // origin → border
     if (!state.routes[c.id]) {
       const r = await osrmRoute(state.userLng, state.userLat, c.lng, c.lat);
+      if (!fresh()) return;
       if (r) state.routes[c.id] = r;
       await new Promise(r => setTimeout(r, 200));
     }
-    // border → destination (only if dest set)
     if (state.destLat != null && !state.routesAfter[c.id]) {
       const r2 = await osrmRoute(c.lng, c.lat, state.destLng, state.destLat);
+      if (!fresh()) return;
       if (r2) state.routesAfter[c.id] = r2;
       await new Promise(r => setTimeout(r, 200));
     }
-    // Progressive re-render
     if ((i + 1) % 2 === 0 || i === filtered.length - 1) renderCrossings();
+  }
+  if (fresh()) {
+    state.routesLoading = false;
+    _lastRoutePos = posKey; _lastDestPos = destKey;
   }
 }
 
@@ -707,16 +736,26 @@ function totalTimeMinutes(c) {
   const d = state.crossingData[c.id];
   const route = state.routes[c.id];
   const routeAfter = state.routesAfter[c.id];
-  // Use OSRM data if available, fallback to haversine estimate
+  // Use OSRM data if available, else a clearly-marked straight-line estimate
+  const driveEstimate = !route;
   const distTo = route ? route.distKm : Math.round(haversine(state.userLat, state.userLng, c.lat, c.lng) * 1.3);
   const driveTo = route ? route.driveMin : Math.round(distTo / 50 * 60);
-  // Two-sided wait: UA queue + EU queue. Backend already sums them in waitMinutes.
-  const waitUA = d?.uaWaitMinutes;
-  const waitEU = d?.euWaitMinutes;
-  const wait = d ? (d.waitMinutes ?? 60) : 60;
+
+  // Two-sided wait: UA queue + EU queue, computed here (don't trust an opaque sum).
+  const waitUA = (d && d.uaWaitMinutes != null) ? d.uaWaitMinutes : null;
+  const waitEU = (d && d.euWaitMinutes != null) ? d.euWaitMinutes : null;
+  let wait, waitKnown;
+  if (waitUA != null || waitEU != null) {
+    wait = (waitUA || 0) + (waitEU || 0);
+    waitKnown = true;
+  } else if (d && d.waitMinutes != null) {
+    wait = d.waitMinutes; waitKnown = true;
+  } else {
+    wait = 0; waitKnown = false; // unknown — shown as "н/д", sorted to the bottom
+  }
 
   // After border (only if destination set)
-  let driveAfter = 0, distAfter = 0;
+  let driveAfter = 0, distAfter = 0, driveAfterEstimate = false;
   if (state.destLat != null) {
     if (routeAfter) {
       driveAfter = routeAfter.driveMin;
@@ -724,6 +763,7 @@ function totalTimeMinutes(c) {
     } else {
       distAfter = Math.round(haversine(c.lat, c.lng, state.destLat, state.destLng) * 1.3);
       driveAfter = Math.round(distAfter / 70 * 60); // EU roads typically faster
+      driveAfterEstimate = true;
     }
   }
 
@@ -735,9 +775,12 @@ function totalTimeMinutes(c) {
   }
 
   return {
-    drive: driveTo, wait, waitUA, waitEU, driveAfter,
+    drive: driveTo, wait, waitUA, waitEU, waitKnown, driveAfter,
+    estimate: driveEstimate || driveAfterEstimate,
     total: driveTo + wait + driveAfter,
     distKm: distTo, distAfter,
+    stale: !!(d && d.stale),
+    ageMinutes: d ? d.dataAgeMinutes : null,
     hasDest: state.destLat != null,
     relevance: Math.round(relevance),
   };
@@ -756,6 +799,13 @@ function fmtHM(min) {
   const h = Math.floor(min/60), m = min%60;
   return `${h} h : ${String(m).padStart(2,'0')} min`;
 }
+// Human "time ago" for data age: "12 хв тому" / "3 год тому" / "14 дн тому"
+function fmtAge(min) {
+  if (min == null) return '';
+  if (min < 60) return `${Math.round(min)} хв тому`;
+  if (min < 1440) return `${Math.round(min/60)} год тому`;
+  return `${Math.round(min/1440)} дн тому`;
+}
 
 // ── Render ──
 function renderCrossings() {
@@ -765,32 +815,44 @@ function renderCrossings() {
     ...c, ...totalTimeMinutes(c), data: state.crossingData[c.id] || {},
   }));
 
-  if (state.destLat != null) {
-    // With destination: primary sort by relevance (on-the-way first),
-    // tiebreak by selected mode within similar relevance
-    const secondary = state.sortBy === 'closest' ? (a,b) => a.distKm - b.distKm
-      : state.sortBy === 'shortest_queue' ? (a,b) => (a.wait||999) - (b.wait||999)
-      : (a,b) => a.total - b.total;
+  // Value of a crossing under the active metric (lower = better).
+  // Unknown queue → Infinity so it sinks in "shortest_queue".
+  const metricVal = (c) =>
+    state.sortBy === 'closest' ? c.distKm :
+    state.sortBy === 'shortest_queue' ? (c.waitKnown ? c.wait : Infinity) :
+    c.total;
 
-    withTimes.sort((a,b) => {
-      // Group: 0-30km = on the way, 30-100 = slight detour, 100+ = big detour
-      const grpA = a.relevance < 30 ? 0 : a.relevance < 100 ? 1 : 2;
-      const grpB = b.relevance < 30 ? 0 : b.relevance < 100 ? 1 : 2;
-      if (grpA !== grpB) return grpA - grpB;
-      return secondary(a, b);
-    });
-  } else {
-    // Without destination: sort purely by selected mode
-    if (state.sortBy === 'closest') {
-      withTimes.sort((a,b) => a.distKm - b.distKm);
-    } else if (state.sortBy === 'shortest_queue') {
-      withTimes.sort((a,b) => (a.wait||999) - (b.wait||999));
-    } else {
-      withTimes.sort((a,b) => a.total - b.total);
+  withTimes.sort((a, b) => {
+    // Closed crossings always sink to the bottom
+    const closedA = a.data.isOpen === false ? 1 : 0;
+    const closedB = b.data.isOpen === false ? 1 : 0;
+    if (closedA !== closedB) return closedA - closedB;
+
+    if (state.destLat != null) {
+      // Group by detour: on-the-way first, then by metric within each group
+      const grp = (c) => c.relevance < 30 ? 0 : c.relevance < 100 ? 1 : 2;
+      const g = grp(a) - grp(b);
+      if (g !== 0) return g;
     }
+    return metricVal(a) - metricVal(b);
+  });
+
+  // Best = the top OPEN crossing in the already-sorted list (sort respects both
+  // direction grouping and the active metric). We don't skip stale here, because
+  // for some directions every sensible crossing is stale (e.g. RO border) and
+  // recommending a fresh-but-1000km-detour crossing would be wrong — the stale
+  // badge informs the driver instead. Tie-break: within the SAME relevance group
+  // and metric value, prefer a fresh crossing over a stale one.
+  const openList = withTimes.filter(c => c.data.isOpen !== false);
+  let bestId = openList.length ? openList[0].id : null;
+  if (openList.length > 1 && openList[0].stale) {
+    const top = openList[0];
+    const sameGroup = openList.find(c =>
+      !c.stale &&
+      (!c.hasDest || Math.abs(c.relevance - top.relevance) < 30) &&
+      Math.abs((c.total||0) - (top.total||0)) < 20); // within 20 min
+    if (sameGroup) bestId = sameGroup.id;
   }
-  // Best = first open crossing (skip closed)
-  const bestId = (withTimes.find(c => c.data.isOpen !== false) || {}).id || null;
   // Top-3 open crossings get the route colors used on the map
   const openTop3 = withTimes.filter(c => c.data.isOpen !== false).slice(0, 3).map(c => c.id);
   const ROUTE_COLORS = ['#22c55e', '#eab308', '#6366f1'];
@@ -808,40 +870,44 @@ function renderCrossings() {
     // Use the route color (matches map line) so total stands out, fallback to white for non-top-3
     const totalColor = routeIdx >= 0 ? ROUTE_COLORS[routeIdx] : '#ffffff';
     const detourNote = (c.hasDest && c.relevance >= 30) ? `<div style="font-size:10px;color:var(--text2);margin-top:4px;opacity:0.6">${c.relevance < 100 ? 'невеликий крюк' : 'великий крюк'} (+${c.relevance} км)</div>` : '';
+    const est = c.estimate ? '~' : '';               // ~ marks straight-line guess
+    const queueVal = c.waitKnown ? fmt(c.wait) : 'н/д'; // unknown queue, not "0"
+    const queueSplit = (c.waitUA != null && c.waitEU != null)
+      ? `<span class="seg-meta">UA ${fmt(c.waitUA)} + ${FLAGS[c.country]} ${fmt(c.waitEU)}</span>`
+      : (c.waitUA != null) ? `<span class="seg-meta">тільки UA-сторона</span>`
+      : (c.waitEU != null) ? `<span class="seg-meta">тільки ${FLAGS[c.country]}-сторона</span>`
+      : `<span class="seg-meta">немає даних</span>`;
     const breakdown = c.hasDest
       ? `<div class="time-breakdown">
-          <div class="seg"><span class="seg-label">до кордону</span><span class="seg-value">${fmt(c.drive)}</span><span class="seg-meta">${c.distKm} км</span></div>
+          <div class="seg"><span class="seg-label">до кордону</span><span class="seg-value">${est}${fmt(c.drive)}</span><span class="seg-meta">${c.distKm} км</span></div>
           <div class="seg-sep">+</div>
-          <div class="seg"><span class="seg-label">черга</span><span class="seg-value ${status}">${fmt(c.wait)}</span>${
-            (c.waitUA != null && c.waitEU != null)
-              ? `<span class="seg-meta">UA ${fmt(c.waitUA)} + ${FLAGS[c.country]} ${fmt(c.waitEU)}</span>`
-              : (c.waitUA != null) ? `<span class="seg-meta">тільки UA-сторона</span>`
-              : (c.waitEU != null) ? `<span class="seg-meta">тільки ${FLAGS[c.country]}-сторона</span>` : ''
-          }</div>
+          <div class="seg"><span class="seg-label">черга</span><span class="seg-value ${status}">${queueVal}</span>${queueSplit}</div>
           <div class="seg-sep">+</div>
-          <div class="seg"><span class="seg-label">після кордону</span><span class="seg-value">${fmt(c.driveAfter)}</span><span class="seg-meta">${c.distAfter} км</span></div>
-          <div class="seg-total">= <b style="color:${totalColor}">${fmt(c.total)}</b></div>
+          <div class="seg"><span class="seg-label">після кордону</span><span class="seg-value">${est}${fmt(c.driveAfter)}</span><span class="seg-meta">${c.distAfter} км</span></div>
+          <div class="seg-total">= <b style="color:${totalColor}">${est}${fmt(c.total)}</b></div>
          </div>`
       : `<div class="crossing-stats">
           <div class="stat"><div class="stat-value ${status}">${d.cars!=null?d.cars:'—'}</div><div class="stat-label">авто</div></div>
-          <div class="stat"><div class="stat-value">${fmt(c.wait)}</div><div class="stat-label">черга${
+          <div class="stat"><div class="stat-value">${queueVal}</div><div class="stat-label">черга${
             (c.waitUA != null && c.waitEU != null) ? ` <span style="font-size:8px;opacity:0.7">UA${c.waitUA}+${FLAGS[c.country]}${c.waitEU}</span>` : ''
           }</div></div>
-          <div class="stat"><div class="stat-value">${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
+          <div class="stat"><div class="stat-value">${est}${fmt(c.drive)}</div><div class="stat-label">дорога</div></div>
          </div>`;
+    const staleBadge = (!isClosed && c.stale && c.ageMinutes != null)
+      ? `<span class="stale-badge" title="Дані застарілі">⚠ ${fmtAge(c.ageMinutes)}</span>` : '';
     return `
-      <div class="crossing-card ${isBest?'recommended':''}" style="${isClosed?'opacity:0.5':''}" onclick="openDetail('${c.id}')">
+      <div class="crossing-card ${isBest?'recommended':''} ${c.stale&&!isClosed?'is-stale':''}" style="${isClosed?'opacity:0.5':''}" onclick="openDetail('${c.id}')">
         <span class="badge ${badgeClass}">${statusLabel}</span>
-        <div class="crossing-name">${c.name}${isClosed?' <span style="color:#ef4444;font-size:11px;font-weight:400">(тимчасово закритий)</span>':''}</div>
+        <div class="crossing-name">${c.name}${isClosed?' <span style="color:#ef4444;font-size:11px;font-weight:400">(тимчасово закритий)</span>':''}${staleBadge}</div>
         <div class="crossing-country">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · ${c.distKm} км до кордону</div>
         ${breakdown}
         <div class="crossing-bar"><div class="crossing-bar-fill" style="width:${barWidth}%;background:${barColor}"></div></div>
         ${detourNote}
         ${isBest?`<div class="recommendation">&#9733; ${
           state.sortBy==='closest' ? `Найближче: ${c.distKm} км` :
-          state.sortBy==='shortest_queue' ? `Найменша черга: ${fmt(c.wait)}` :
-          c.hasDest ? `Найшвидше: ${fmt(c.total)} (дорога + черга + після кордону)`
-                    : `Найшвидше: ${fmt(c.total)} (дорога + черга)`
+          state.sortBy==='shortest_queue' ? `Найменша черга: ${queueVal}` :
+          c.hasDest ? `Найшвидше: ${est}${fmt(c.total)} (дорога + черга + після кордону)`
+                    : `Найшвидше: ${est}${fmt(c.total)} (дорога + черга)`
         }</div>`:''}
       </div>`;
   }).join('');
@@ -1013,7 +1079,9 @@ function openDetail(id) {
   document.getElementById('detailPanel').innerHTML = `
     <button class="close-detail" onclick="closeDetail()">✕</button>
     <h2>${c.name}${isClosed?' <span style="color:#ef4444;font-size:14px">(тимчасово закритий)</span>':''}</h2>
-    <div class="subtitle">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · Джерела: ${sources} · ${d.updatedAt||''}</div>
+    <div class="subtitle">${FLAGS[c.country]} ${COUNTRY_NAMES[c.country]} · Джерела: ${sources}${
+      d.dataAgeMinutes != null ? ` · <span style="color:${d.stale?'#f59e0b':'inherit'}">${d.stale?'⚠ ':''}дані ${fmtAge(d.dataAgeMinutes)}</span>` : ''
+    }</div>
     <div class="detail-grid">
       <div class="detail-stat"><div class="val" style="color:${sc}">${d.cars!=null?d.cars:'—'}</div><div class="lbl">Легкових авто</div></div>
       <div class="detail-stat"><div class="val">${d.trucks!=null?d.trucks:'—'}</div><div class="lbl">Вантажівок</div></div>
@@ -1042,15 +1110,37 @@ function closeDetail() { document.getElementById('detailOverlay').classList.remo
 
 // ── Controls ──
 
-function setVehicle(type) {
+// Persist trip prefs so the driver doesn't retype "Львів → Варшава" each time
+function persistPrefs() {
+  try {
+    localStorage.setItem('kordon.prefs', JSON.stringify({
+      userLat: state.userLat, userLng: state.userLng,
+      originLabel: document.getElementById('locationInput')?.value || '',
+      destLat: state.destLat, destLng: state.destLng, destName: state.destName,
+      vehicle: state.vehicle, sortBy: state.sortBy,
+    }));
+  } catch(e) {}
+}
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem('kordon.prefs') || 'null'); }
+  catch(e) { return null; }
+}
+
+async function setVehicle(type) {
   state.vehicle = type;
   document.querySelectorAll('.veh-btn').forEach(b => b.classList.toggle('active', b.dataset.type===type));
+  state.routes = {}; state.routesAfter = {};
+  _lastRoutePos = null; _lastDestPos = null; // eligible crossings changed → refetch
+  persistPrefs();
+  renderCrossings();
+  await fetchRoutes();
   renderCrossings();
 }
 
 function setSort(mode) {
   state.sortBy = mode;
   document.querySelectorAll('.sort-tab').forEach(t => t.classList.toggle('active', t.dataset.sort===mode));
+  persistPrefs();
   renderCrossings();
 }
 
@@ -1073,6 +1163,7 @@ async function setUserPosition(lat, lng, label) {
   state.routesAfter = {};
   _lastRoutePos = null; _lastDestPos = null; // force refetch
   map.flyTo([lat, lng], 8);
+  persistPrefs();
   renderCrossings(); // render immediately with fallback estimates
   await fetchRoutes(); // then update with real routes
   renderCrossings();
@@ -1153,6 +1244,7 @@ setupGeoInput(
     state.destLat = lat; state.destLng = lng; state.destName = name;
     state.routesAfter = {};
     _lastDestPos = null; // force refetch
+    persistPrefs();
     renderCrossings();
     await fetchRoutes();
     renderCrossings();
@@ -1164,6 +1256,7 @@ async function clearDest() {
   state.routesAfter = {};
   _lastDestPos = null;
   document.getElementById('destInput').value = '';
+  persistPrefs();
   renderCrossings();
 }
 
@@ -1196,11 +1289,39 @@ async function refreshData() {
 
   // Fetch real driving routes from OSRM (non-blocking, re-renders when done)
   fetchRoutes().then(() => renderCrossings());
-  document.getElementById('lastUpdate').textContent =
-    `Оновлено: ${new Date().toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'})}`;
+  // Show real data age when LIVE, else client time for SIM
+  const lu = document.getElementById('lastUpdate');
+  if (state.isLive && state.lastUpdate) {
+    const ageMin = Math.round((Date.now() - new Date(state.lastUpdate).getTime()) / 60000);
+    lu.textContent = `Дані оновлено ${ageMin < 1 ? 'щойно' : fmtAge(ageMin)}`;
+  } else {
+    lu.textContent = `Оновлено: ${new Date().toLocaleTimeString('uk-UA',{hour:'2-digit',minute:'2-digit'})}`;
+  }
   btn.classList.remove('loading');
   btn.innerHTML = '&#8635; Оновити';
 }
+
+// Restore saved trip (origin / destination / vehicle / sort) on load
+(function restorePrefs() {
+  const p = loadPrefs();
+  if (!p) return;
+  if (p.vehicle) {
+    state.vehicle = p.vehicle;
+    document.querySelectorAll('.veh-btn').forEach(b => b.classList.toggle('active', b.dataset.type===p.vehicle));
+  }
+  if (p.sortBy) {
+    state.sortBy = p.sortBy;
+    document.querySelectorAll('.sort-tab').forEach(t => t.classList.toggle('active', t.dataset.sort===p.sortBy));
+  }
+  if (p.userLat != null && p.userLng != null) {
+    state.userLat = p.userLat; state.userLng = p.userLng;
+    if (p.originLabel) document.getElementById('locationInput').value = p.originLabel;
+  }
+  if (p.destLat != null && p.destLng != null) {
+    state.destLat = p.destLat; state.destLng = p.destLng; state.destName = p.destName;
+    if (p.destName) document.getElementById('destInput').value = p.destName;
+  }
+})();
 
 refreshData();
 setInterval(refreshData, 5 * 60 * 1000);

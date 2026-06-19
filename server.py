@@ -9,6 +9,7 @@ import json
 import re
 import time
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,11 +32,47 @@ cache = {
     "slovakia": {},    # checkpoint_id → slovak side data
     "romania": {},     # checkpoint_id → romanian side data
     "hungary": {},     # checkpoint_id → hungarian side data
+    "scraped_at": {},  # source_name → iso timestamp of last SUCCESSFUL non-empty scrape
     "last_update": None,
     "errors": [],
 }
 
 SCRAPE_INTERVAL = 300  # 5 minutes
+STALE_AFTER_MIN = 90   # data older than this is flagged stale (DPSU itself lags ~40min)
+_scrape_lock = asyncio.Lock()  # serialize scrape_all (background loop vs /api/refresh)
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _age_minutes(iso_str):
+    """Age in minutes of an ISO-8601 UTC timestamp; None if unparseable."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 60)
+    except Exception:
+        return None
+
+
+def _dpsu_age_minutes(s):
+    """DPSU timestamps look like '2026-06-05 06:15:55' in Kyiv time (UTC+3 summer).
+    Returns age in minutes, or None if unparseable."""
+    if not s:
+        return None
+    try:
+        dt = datetime.strptime(s.strip()[:19], "%Y-%m-%d %H:%M:%S")
+        # Treat as Kyiv local (UTC+3); convert to UTC for comparison
+        dt = dt.replace(tzinfo=timezone.utc)
+        from datetime import timedelta
+        dt = dt - timedelta(hours=3)
+        return max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 60)
+    except Exception:
+        return None
 
 
 # ── Crossing definitions ───────────────────────
@@ -158,21 +195,32 @@ async def scrape_dpsu(client: httpx.AsyncClient):
                 else:
                     status = "red"
 
+            # Normalize open-state: tolerate wording/case changes
+            # ("відкритий" / "Відкрито" / "відкрито" all mean open)
+            is_open = "відкрит" in (state or "").lower()
+
             results[matched_id] = {
                 "cars": cars,
                 "trucks": trucks,
                 "speed": speed,
                 "waitMinutes": wait_minutes,
                 "status": status,
-                "isOpen": state == "відкритий",
+                "isOpen": is_open,
                 "webcam": video if video else None,
                 "updatedAt": updated,
                 "source": "ДПСУ",
             }
 
-        cache["dpsu"] = results
-        log.info(f"DPSU: scraped {len(results)} crossings")
-        return True
+        # Only overwrite cache on a successful non-empty scrape — never blank
+        # out good data because the site hiccuped or changed shape.
+        if results:
+            cache["dpsu"] = results
+            cache["scraped_at"]["dpsu"] = _now_iso()
+            log.info(f"DPSU: scraped {len(results)} crossings")
+            return True
+        log.warning("DPSU: parsed 0 crossings — keeping previous cache")
+        cache["errors"].append("DPSU: parsed 0 crossings (site shape changed?)")
+        return False
 
     except Exception as e:
         log.error(f"DPSU scrape failed: {e}")
@@ -199,33 +247,38 @@ async def scrape_echerha(client: httpx.AsyncClient):
             data = resp.json()
 
             for item in data.get("data", []):
-                lat = item.get("lat", 0)
-                lng = item.get("lng", 0)
-
-                # Match by proximity
-                best_id = None
-                best_dist = 999
-                if lat is None or lng is None:
+                lat = item.get("lat")
+                lng = item.get("lng")
+                # Treat missing/zero coords as unusable (0,0 is in the ocean)
+                if not lat or not lng:
                     continue
+
+                # Match to the single nearest crossing within a tight radius
+                best_id = None
+                best_dist = 999.0
                 for c in CROSSINGS:
                     d = abs(c["lat"] - lat) + abs(c["lng"] - lng)
                     if d < best_dist:
                         best_dist = d
                         best_id = c["id"]
 
-                if best_dist > 0.5 or not best_id:
+                if best_dist > 0.35 or not best_id:
                     continue
 
                 if best_id not in results:
                     results[best_id] = {}
 
-                wait_sec = item.get("wait_time", 0)
+                wait_sec = item.get("wait_time", 0) or 0
                 count = item.get("vehicle_in_active_queues_counts", 0)
                 is_paused = item.get("is_paused", False)
+                wait_min = round(wait_sec / 60)
+                # Clamp implausible values (upstream sometimes returns multi-day garbage)
+                if wait_min > 3000:  # >50h is almost certainly stale/garbage
+                    wait_min = None
 
                 results[best_id][type_name] = {
                     "count": count,
-                    "waitMinutes": round(wait_sec / 60) if wait_sec else 0,
+                    "waitMinutes": wait_min,
                     "isPaused": is_paused,
                     "freeSlots": item.get("free_slots_today"),
                 }
@@ -234,9 +287,13 @@ async def scrape_echerha(client: httpx.AsyncClient):
             log.error(f"eCherha type {type_id} failed: {e}")
             cache["errors"].append(f"eCherha({type_name}): {e}")
 
-    cache["echerha"] = results
-    log.info(f"eCherha: scraped {len(results)} crossings")
-    return len(results) > 0
+    if results:
+        cache["echerha"] = results
+        cache["scraped_at"]["echerha"] = _now_iso()
+        log.info(f"eCherha: scraped {len(results)} crossings")
+        return True
+    log.warning("eCherha: 0 crossings — keeping previous cache")
+    return False
 
 
 async def scrape_poland(client: httpx.AsyncClient):
@@ -332,9 +389,13 @@ async def scrape_poland(client: httpx.AsyncClient):
             log.error(f"Poland scrape ({direction}) failed: {e}")
             cache["errors"].append(f"Poland({direction}): {e}")
 
-    cache["poland"] = results
-    log.info(f"Poland: scraped {len(results)} crossings")
-    return len(results) > 0
+    if results:
+        cache["poland"] = results
+        cache["scraped_at"]["poland"] = _now_iso()
+        log.info(f"Poland: scraped {len(results)} crossings")
+        return True
+    log.warning("Poland: 0 crossings — keeping previous cache")
+    return False
 
 
 async def scrape_slovakia(client: httpx.AsyncClient):
@@ -364,9 +425,14 @@ async def scrape_slovakia(client: httpx.AsyncClient):
                 if time_matches:
                     results[cid] = {"sk_wait": int(time_matches[0])}
 
-        cache["slovakia"] = results
-        log.info(f"Slovakia: scraped {len(results)} crossings")
-        return True
+        if results:
+            cache["slovakia"] = results
+            cache["scraped_at"]["slovakia"] = _now_iso()
+            log.info(f"Slovakia: scraped {len(results)} crossings")
+            return True
+        log.warning("Slovakia: 0 crossings — keeping previous cache")
+        cache["errors"].append("Slovakia: parsed 0 crossings")
+        return False
 
     except Exception as e:
         log.error(f"Slovakia scrape failed: {e}")
@@ -424,9 +490,13 @@ async def scrape_romania(client: httpx.AsyncClient):
         except Exception as e:
             log.error(f"Romania scrape ({direction}) failed: {e}")
             cache["errors"].append(f"Romania({direction}): {e}")
-    cache["romania"] = results
-    log.info(f"Romania: scraped {len(results)} crossings")
-    return len(results) > 0
+    if results:
+        cache["romania"] = results
+        cache["scraped_at"]["romania"] = _now_iso()
+        log.info(f"Romania: scraped {len(results)} crossings")
+        return True
+    log.warning("Romania: 0 crossings — keeping previous cache")
+    return False
 
 
 async def scrape_hungary(client: httpx.AsyncClient):
@@ -491,9 +561,13 @@ async def scrape_hungary(client: httpx.AsyncClient):
                     results[cid] = {}
                 # use as estimate
                 results[cid]["hu_wait"] = wait_min
-        cache["hungary"] = results
-        log.info(f"Hungary: scraped {len(results)} crossings")
-        return len(results) > 0
+        if results:
+            cache["hungary"] = results
+            cache["scraped_at"]["hungary"] = _now_iso()
+            log.info(f"Hungary: scraped {len(results)} crossings")
+            return True
+        log.warning("Hungary: 0 crossings — keeping previous cache")
+        return False
     except Exception as e:
         log.error(f"Hungary scrape failed: {e}")
         cache["errors"].append(f"Hungary: {e}")
@@ -618,6 +692,27 @@ def merge_data():
             entry["waitMinutes"] = eu_wait
         # else: stays None
 
+        # ── Data freshness ──────────────────────────────────
+        # Report how old the QUEUE numbers actually are — not when we last polled.
+        # DPSU carries a real measurement timestamp per crossing (catches the
+        # "shows 0 min but it's 14 days old" trap). EU sources are live at fetch,
+        # so their age = when we last scraped that country.
+        country_src = {"PL": "poland", "SK": "slovakia", "RO": "romania", "HU": "hungary"}
+        ua_age = _dpsu_age_minutes(dpsu.get("updatedAt")) if dpsu else None
+        eu_age = _age_minutes(cache["scraped_at"].get(country_src.get(c["country"])))
+
+        contributing = []  # ages of the sources that actually formed waitMinutes
+        if ua_wait is not None and ua_age is not None:
+            contributing.append(ua_age)
+        if eu_wait is not None and eu_age is not None:
+            contributing.append(eu_age)
+        # "At least this stale" — the most pessimistic of the contributing sources.
+        data_age = round(max(contributing)) if contributing else None
+        ua_age_r = round(ua_age) if ua_age is not None else None
+        entry["uaAgeMinutes"] = ua_age_r
+        entry["dataAgeMinutes"] = data_age
+        entry["stale"] = bool(data_age is not None and data_age > STALE_AFTER_MIN)
+
         if entry["waitMinutes"] is not None:
             wm = entry["waitMinutes"]
             if wm < 30:
@@ -640,28 +735,43 @@ def merge_data():
 # ── Background scraper ─────────────────────────
 
 async def scrape_all():
-    """Run all scrapers and merge results."""
-    cache["errors"] = []
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        results = await asyncio.gather(
-            scrape_dpsu(client),
-            scrape_echerha(client),
-            scrape_poland(client),
-            scrape_slovakia(client),
-            scrape_romania(client),
-            scrape_hungary(client),
-            return_exceptions=True,
-        )
-        for i, r in enumerate(results):
-            if isinstance(r, Exception):
-                log.error(f"Scraper {i} exception: {r}")
+    """Run all scrapers and merge results. Serialized via a lock so the
+    background loop and /api/refresh never mutate the cache concurrently."""
+    async with _scrape_lock:
+        cache["errors"] = []
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            results = await asyncio.gather(
+                scrape_dpsu(client),
+                scrape_echerha(client),
+                scrape_poland(client),
+                scrape_slovakia(client),
+                scrape_romania(client),
+                scrape_hungary(client),
+                return_exceptions=True,
+            )
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    log.error(f"Scraper {i} exception: {r}")
+        cache["last_update"] = _now_iso()
+        log.info(f"All scrapers done. Errors: {len(cache['errors'])}")
 
-    cache["last_update"] = datetime.now(timezone.utc).isoformat()
-    log.info(f"All scrapers done. Errors: {len(cache['errors'])}")
+
+def sources_status():
+    """Per-source health: live flag + age in minutes of last good scrape."""
+    out = {}
+    for key in ("dpsu", "echerha", "poland", "slovakia", "romania", "hungary"):
+        ts = cache["scraped_at"].get(key)
+        age = _age_minutes(ts)
+        out[key] = {
+            "live": len(cache[key]) > 0,
+            "ageMinutes": round(age) if age is not None else None,
+        }
+    return out
 
 
 async def scrape_loop():
-    """Background loop that scrapes every SCRAPE_INTERVAL seconds."""
+    """Background loop that scrapes every SCRAPE_INTERVAL seconds. Supervised:
+    if it ever crashes, log and keep going rather than dying silently."""
     while True:
         try:
             await scrape_all()
@@ -670,95 +780,128 @@ async def scrape_loop():
         await asyncio.sleep(SCRAPE_INTERVAL)
 
 
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(scrape_loop())
+@asynccontextmanager
+async def lifespan(app):
+    # Warm the cache before serving, then keep a reference to the loop task.
+    task = asyncio.create_task(scrape_loop())
+    app.state.scrape_task = task
+    yield
+    task.cancel()
+
+
+app.router.lifespan_context = lifespan
 
 
 # ── API Endpoints ──────────────────────────────
+
+def _flat_sources():
+    """Backwards-compatible flat bool map (frontend source dots rely on this)."""
+    return {k: v["live"] for k, v in sources_status().items()}
+
 
 @app.get("/api/crossings")
 async def get_crossings():
     """Return merged crossing data from all sources."""
     merged = merge_data()
-    return JSONResponse({
-        "crossings": merged,
-        "lastUpdate": cache["last_update"],
-        "sources": {
-            "dpsu": len(cache["dpsu"]) > 0,
-            "echerha": len(cache["echerha"]) > 0,
-            "poland": len(cache["poland"]) > 0,
-            "slovakia": len(cache["slovakia"]) > 0,
-            "romania": len(cache["romania"]) > 0,
-            "hungary": len(cache["hungary"]) > 0,
+    return JSONResponse(
+        {
+            "crossings": merged,
+            "lastUpdate": cache["last_update"],
+            "sources": _flat_sources(),
+            "sourcesDetail": sources_status(),
+            "errors": cache["errors"][-10:],  # Last 10 errors
         },
-        "errors": cache["errors"][-10:],  # Last 10 errors
-    })
+        headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=120"},
+    )
 
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "lastUpdate": cache["last_update"]}
+    return {"status": "ok", "lastUpdate": cache["last_update"], "sources": sources_status()}
 
 
 @app.post("/api/refresh")
 async def refresh():
-    """Force refresh all data."""
-    await scrape_all()
+    """Force refresh all data. If a scrape is already running, just return
+    the current snapshot instead of piling on a second concurrent scrape."""
+    if not _scrape_lock.locked():
+        await scrape_all()
     merged = merge_data()
     return JSONResponse({
         "crossings": merged,
         "lastUpdate": cache["last_update"],
-        "sources": {
-            "dpsu": len(cache["dpsu"]) > 0,
-            "echerha": len(cache["echerha"]) > 0,
-            "poland": len(cache["poland"]) > 0,
-            "slovakia": len(cache["slovakia"]) > 0,
-            "romania": len(cache["romania"]) > 0,
-            "hungary": len(cache["hungary"]) > 0,
-        },
+        "sources": _flat_sources(),
+        "sourcesDetail": sources_status(),
     })
 
 
-async def _osrm_route(client, from_lng, from_lat, to_lng, to_lat):
-    url = f"https://router.project-osrm.org/route/v1/driving/{from_lng},{from_lat};{to_lng},{to_lat}?overview=full&geometries=geojson"
-    try:
-        resp = await client.get(url)
-        if resp.status_code == 429:
-            await asyncio.sleep(1)
-            resp = await client.get(url)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == "Ok" and data.get("routes"):
-                r = data["routes"][0]
-                return {
-                    "distKm": round(r["distance"] / 1000),
-                    "driveMin": round(r["duration"] / 60),
-                    "geometry": r["geometry"]["coordinates"],
-                }
-    except Exception as e:
-        log.warning(f"OSRM failed: {e}")
-    return None
+async def _osrm_route(client, from_lng, from_lat, to_lng, to_lat, sem):
+    # 'simplified' geometry cuts the payload dramatically vs 'full' while
+    # still drawing a road-shaped line.
+    url = (f"https://router.project-osrm.org/route/v1/driving/"
+           f"{from_lng},{from_lat};{to_lng},{to_lat}"
+           f"?overview=simplified&geometries=geojson")
+    async with sem:
+        for attempt in range(3):
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 429:
+                    await asyncio.sleep(1 + attempt)
+                    continue
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("code") == "Ok" and data.get("routes"):
+                        r = data["routes"][0]
+                        return {
+                            "distKm": round(r["distance"] / 1000),
+                            "driveMin": round(r["duration"] / 60),
+                            "geometry": r["geometry"]["coordinates"],
+                        }
+                return None
+            except Exception as e:
+                log.warning(f"OSRM failed (attempt {attempt+1}): {e}")
+                await asyncio.sleep(0.5)
+        return None
+
+
+def _valid_coord(lat, lng):
+    return (lat is not None and lng is not None
+            and -90 <= lat <= 90 and -180 <= lng <= 180)
 
 
 @app.get("/api/routes")
 async def get_routes(from_lat: float, from_lng: float, to_lat: float = None, to_lng: float = None):
-    """Fetch OSRM driving routes: origin→border, and border→destination if to_* provided."""
+    """Fetch OSRM driving routes: origin→border, and border→destination if to_* set.
+    Coordinates are validated; requests run concurrently (bounded) for speed."""
+    if not _valid_coord(from_lat, from_lng):
+        return JSONResponse({"error": "invalid from coordinates"}, status_code=422)
+    has_dest = to_lat is not None and to_lng is not None
+    if has_dest and not _valid_coord(to_lat, to_lng):
+        return JSONResponse({"error": "invalid to coordinates"}, status_code=422)
+
+    sem = asyncio.Semaphore(5)  # be gentle with the public OSRM demo server
     routes = {}
     routes_after = {}
-    async with httpx.AsyncClient(timeout=10) as client:
-        for cp in CROSSINGS:
-            cid, lat, lng = cp["id"], cp["lat"], cp["lng"]
-            r = await _osrm_route(client, from_lng, from_lat, lng, lat)
+    async with httpx.AsyncClient(timeout=12) as client:
+        async def leg_to_border(cp):
+            r = await _osrm_route(client, from_lng, from_lat, cp["lng"], cp["lat"], sem)
             if r:
-                routes[cid] = r
-            await asyncio.sleep(0.15)
-            if to_lat is not None and to_lng is not None:
-                r2 = await _osrm_route(client, lng, lat, to_lng, to_lat)
-                if r2:
-                    routes_after[cid] = r2
-                await asyncio.sleep(0.15)
-    return JSONResponse({"routes": routes, "routesAfter": routes_after})
+                routes[cp["id"]] = r
+
+        async def leg_after(cp):
+            r = await _osrm_route(client, cp["lng"], cp["lat"], to_lng, to_lat, sem)
+            if r:
+                routes_after[cp["id"]] = r
+
+        tasks = [leg_to_border(cp) for cp in CROSSINGS]
+        if has_dest:
+            tasks += [leg_after(cp) for cp in CROSSINGS]
+        await asyncio.gather(*tasks)
+
+    return JSONResponse(
+        {"routes": routes, "routesAfter": routes_after},
+        headers={"Cache-Control": "public, max-age=120"},
+    )
 
 
 # ── Serve frontend ─────────────────────────────
