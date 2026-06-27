@@ -6,6 +6,7 @@ Serves API + static frontend
 
 import asyncio
 import json
+import math
 import re
 import time
 import logging
@@ -869,10 +870,38 @@ def _valid_coord(lat, lng):
             and -90 <= lat <= 90 and -180 <= lng <= 180)
 
 
+# A point roughly in the middle of Ukraine. Used only to decide which side of a
+# crossing is "Ukraine" vs "the EU country".
+UA_CENTROID = (49.0, 32.0)
+
+
+def _approach_points(lat, lng, km=15.0):
+    """Two points ~km on each side of a border crossing: one nudged toward the
+    Ukrainian interior, one toward the EU country. Routing each leg to the point
+    on the SAME side as that leg's endpoint stops OSRM from "cheating" across a
+    different open border to reach a point that sits on the borderline."""
+    coslat = math.cos(math.radians(lat)) or 1e-6
+    # Direction toward Ukraine, in km-space (scale lng by cos(lat))
+    vy = UA_CENTROID[0] - lat
+    vx = (UA_CENTROID[1] - lng) * coslat
+    norm = math.hypot(vx, vy) or 1.0
+    off = km / 111.0  # km → degrees of latitude
+    dlat = (vy / norm) * off
+    dlng = (vx / norm) * off / coslat
+    ua = (lat + dlat, lng + dlng)   # toward Ukraine
+    eu = (lat - dlat, lng - dlng)   # toward the EU country
+    return ua, eu
+
+
+def _l1(a, b_lat, b_lng):
+    return abs(a[0] - b_lat) + abs(a[1] - b_lng)
+
+
 @app.get("/api/routes")
 async def get_routes(from_lat: float, from_lng: float, to_lat: float = None, to_lng: float = None):
     """Fetch OSRM driving routes: origin→border, and border→destination if to_* set.
-    Coordinates are validated; requests run concurrently (bounded) for speed."""
+    Each leg is routed to the crossing's approach point on the SAME side as the
+    leg's endpoint, so the path can't shortcut through another country's crossing."""
     if not _valid_coord(from_lat, from_lng):
         return JSONResponse({"error": "invalid from coordinates"}, status_code=422)
     has_dest = to_lat is not None and to_lng is not None
@@ -884,12 +913,18 @@ async def get_routes(from_lat: float, from_lng: float, to_lat: float = None, to_
     routes_after = {}
     async with httpx.AsyncClient(timeout=12) as client:
         async def leg_to_border(cp):
-            r = await _osrm_route(client, from_lng, from_lat, cp["lng"], cp["lat"], sem)
+            ua, eu = _approach_points(cp["lat"], cp["lng"])
+            # approach point on the origin's side
+            o = ua if _l1(ua, from_lat, from_lng) < _l1(eu, from_lat, from_lng) else eu
+            r = await _osrm_route(client, from_lng, from_lat, o[1], o[0], sem)
             if r:
                 routes[cp["id"]] = r
 
         async def leg_after(cp):
-            r = await _osrm_route(client, cp["lng"], cp["lat"], to_lng, to_lat, sem)
+            ua, eu = _approach_points(cp["lat"], cp["lng"])
+            # approach point on the destination's side
+            d = ua if _l1(ua, to_lat, to_lng) < _l1(eu, to_lat, to_lng) else eu
+            r = await _osrm_route(client, d[1], d[0], to_lng, to_lat, sem)
             if r:
                 routes_after[cp["id"]] = r
 

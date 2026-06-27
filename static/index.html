@@ -722,6 +722,31 @@ function haversine(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// Two approach points per crossing — one toward Ukraine, one toward the EU
+// country. Routing each leg to the point on its own side stops OSRM from
+// shortcutting across a different open border (a crossing sits ON the line).
+const UA_CENTROID = [49.0, 32.0];
+function approachPoints(lat, lng, km = 15) {
+  const coslat = Math.cos(lat * Math.PI/180) || 1e-6;
+  let vy = UA_CENTROID[0] - lat;
+  let vx = (UA_CENTROID[1] - lng) * coslat;
+  const norm = Math.hypot(vx, vy) || 1;
+  const off = km / 111;
+  const dlat = (vy/norm) * off;
+  const dlng = (vx/norm) * off / coslat;
+  return {
+    ua: [lat + dlat, lng + dlng],   // toward Ukraine
+    eu: [lat - dlat, lng - dlng],   // toward the EU country
+  };
+}
+// L1 distance helper for "which side is this endpoint on"
+function _l1(pt, lat, lng) { return Math.abs(pt[0]-lat) + Math.abs(pt[1]-lng); }
+// Approach point of crossing c on the same side as (lat,lng)
+function originSidePoint(c, lat, lng) {
+  const ap = approachPoints(c.lat, c.lng);
+  return _l1(ap.ua, lat, lng) < _l1(ap.eu, lat, lng) ? ap.ua : ap.eu;
+}
+
 // Direct OSRM call helper (capped retries to avoid infinite recursion on throttle)
 async function osrmRoute(fromLng, fromLat, toLng, toLat, attempt = 0) {
   const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=simplified&geometries=geojson`;
@@ -782,13 +807,16 @@ async function fetchRoutes() {
     if (!fresh()) return; // abandon if user changed origin/dest mid-loop
     const c = filtered[i];
     if (!state.routes[c.id]) {
-      const r = await osrmRoute(state.userLng, state.userLat, c.lng, c.lat);
+      // route to the approach point on the origin's side (no border shortcut)
+      const o = originSidePoint(c, state.userLat, state.userLng);
+      const r = await osrmRoute(state.userLng, state.userLat, o[1], o[0]);
       if (!fresh()) return;
       if (r) state.routes[c.id] = r;
       await new Promise(r => setTimeout(r, 200));
     }
     if (state.destLat != null && !state.routesAfter[c.id]) {
-      const r2 = await osrmRoute(c.lng, c.lat, state.destLng, state.destLat);
+      const d = originSidePoint(c, state.destLat, state.destLng);
+      const r2 = await osrmRoute(d[1], d[0], state.destLng, state.destLat);
       if (!fresh()) return;
       if (r2) state.routesAfter[c.id] = r2;
       await new Promise(r => setTimeout(r, 200));
@@ -1033,24 +1061,34 @@ function renderMapMarkers(crossings, bestId) {
       const route = state.routes[c.id];
       const routeAfter = state.routesAfter[c.id];
 
-      // Segment 1: origin → border (solid road)
+      // Segment 1: origin → approach point on origin's side (real road)
       let coords1;
       if (route && route.geometry) {
         coords1 = route.geometry.map(p => [p[1], p[0]]);
       } else {
-        coords1 = [[state.userLat,state.userLng],[c.lat,c.lng]];
+        coords1 = [[state.userLat,state.userLng], originSidePoint(c, state.userLat, state.userLng)];
       }
       const line1 = L.polyline(coords1, {color,weight:3,dashArray:'10,7',opacity:0.75}).addTo(map);
       routeLines.push(line1);
 
-      // Segment 2: border → destination (lighter dashes), only if dest set
+      // Connector: approach → the actual crossing point (the border hop itself)
+      const cross = [c.lat, c.lng];
+      const conn = [coords1[coords1.length-1], cross];
+      let coords2 = null;
       if (state.destLat != null) {
-        let coords2;
         if (routeAfter && routeAfter.geometry) {
           coords2 = routeAfter.geometry.map(p => [p[1], p[0]]);
         } else {
-          coords2 = [[c.lat,c.lng],[state.destLat,state.destLng]];
+          coords2 = [originSidePoint(c, state.destLat, state.destLng), [state.destLat,state.destLng]];
         }
+        conn.push(coords2[0]); // crossing → dest-side approach
+      }
+      // Border hop drawn distinctly (dotted) so it's clear WHERE you cross
+      const connLine = L.polyline(conn, {color,weight:2,dashArray:'2,6',opacity:0.5}).addTo(map);
+      routeLines.push(connLine);
+
+      // Segment 2: dest-side approach → destination (lighter dashes)
+      if (coords2) {
         const line2 = L.polyline(coords2, {color,weight:2,dashArray:'4,6',opacity:0.55}).addTo(map);
         routeLines.push(line2);
       }
